@@ -35,5 +35,9 @@
   },
   "engines": {
     "node": ">=22.12.0"
+  },
+  "overrides": {
+    "@typescript-eslint/rule-tester": "8.73.0",
+    "@typescript-eslint/parser": "8.73.0"
   }
 }

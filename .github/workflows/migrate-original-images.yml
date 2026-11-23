@@ -1,5 +1,10 @@
 name: ATTIRE MART one-time local photo migration
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/migrate-original-images.mjs'
+      - '.github/workflows/migrate-original-images.yml'
   workflow_dispatch:
 permissions:
   contents: write
@@ -21,7 +26,7 @@ jobs:
         with:
           node-version: '22'
       - name: Install image conversion and test dependencies
-        run: npm install --no-audit --no-fund --no-package-lock sharp@0.34.3
+        run: npm install --no-save --omit=dev --no-audit --no-fund --package-lock=false sharp@0.34.3
       - name: Fetch and optimize every original product image
         run: node scripts/migrate-original-images.mjs
       - name: Verify all photos are local and no variant changed product

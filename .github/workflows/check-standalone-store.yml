@@ -49,7 +49,7 @@ jobs:
           npm run test:rate-limit
           npm run test:callback
       - name: Bundle native Vercel Functions
-        run: npx --yes esbuild@0.25.12 api/create-order.mjs api/order-status.mjs api/payu-callback.mjs --bundle --platform=node --format=esm --target=node22 --packages=external --outdir=/tmp/attiremart-apis
+        run: npx --no-install esbuild api/create-order.mjs api/order-status.mjs api/payu-callback.mjs --bundle --platform=node --format=esm --target=node22 --packages=external --outdir=/tmp/attiremart-apis
       - name: Build pages, images, sitemap
         run: npm run build
       - name: Verify every product image, colour option and checkout mapping

@@ -1,6 +1,6 @@
 # ATTIRE MART — Vercel & Firebase Firestore Ecommerce Storefront
 
-**GitHub main** contains the independent ATTIRE MART storefront. It includes 24 collections, 184 products, 878 variant records, 1,112 catalogue image references (only **194 WebP files are currently present in this replacement repository**), all policy pages, search, wishlist, a `localStorage` shopping bag, and a guest checkout with PayU hosted payments backed by **Google Firebase Cloud Firestore**. No customer login or account is required. The bag and server enforce a **maximum of 10 items per product across sizes/colours**.
+**GitHub main** contains the independent ATTIRE MART storefront. It includes 24 collections, 184 products, 878 variant records, 1,112 catalogue image references (the deployment verifies that all 1,112 corresponding WebP files exist), all policy pages, search, wishlist, a `localStorage` shopping bag, and a guest checkout with PayU hosted payments backed by **Google Firebase Cloud Firestore**. No customer login or account is required. The bag and server enforce a **maximum of 10 items per product across sizes/colours**.
 
 ## Vercel & Firebase Firestore Setup (Do Not Deploy Before Verification)
 
@@ -48,7 +48,7 @@ Frontend `checkout.js` calls these same-origin endpoints. The APIs share `lib/ch
 
 ## Important: restoring missing media
 
-The replacement repository contains **194 of 1,112 original WebP images**. The production build prioritizes exact, present local files and temporarily uses the corresponding original image's catalogue CDN URL for missing files. It never substitutes a different product's photo. This external image source is temporary and its availability and usage rights must be verified; restore the remaining 918 images from your authorized project export into `media/` for self-hosting. No internal deployment or source-control message is displayed to customers. Do not invent replacement product images or conceal missing assets by weakening CI.
+The production build deliberately fails if any of the 1,112 expected locally hosted WebP photos are missing. Catalogue shards retain exact approved original URLs in their `sources` maps so the image recovery script can restore incomplete uploads without choosing another product's picture. The dedicated GitHub Actions media recovery workflow runs automatically when its recovery script/workflow is updated, or can be started manually. It downloads and validates original pictures, verifies all 184 products and 878 variants, and commits completed media only after all tests pass. The deployed catalogue has no external product-photo dependency.
 
 ## SEO, Local Dev, and Tests
 
@@ -78,7 +78,7 @@ npm run dev
 - Every new or refreshed `request_limits` document includes the Firestore timestamp field `expiresAt`, set 24 hours after the relevant counter window. **TTL deletion requires a one-time database admin setting**. Run `bash scripts/enable-rate-limit-ttl.sh` using a Google Cloud admin identity with permission to modify TTL policies and `FIREBASE_PROJECT_ID` / `FIRESTORE_DATABASE_ID` configured for the real database. Do not put privileged admin keys in the website.
 - To activate through Google Cloud Console instead: Firestore → Databases → the production database → Time-to-live → Create Policy; collection group `request_limits`, timestamp field `expiresAt`, offset 0. Check that it becomes enabled. Without this policy, rate limiting still works but old counter documents are not automatically removed.
 - Signed PayU S2S webhooks receive a retryable 503 if independent payment verification is temporarily unavailable or the transaction is still pending; only verified terminal outcomes receive 200. Browser returns go to authenticated order status even if verification is delayed. Never assume that a callback alone proves payment success.
-- `scripts/migrate-original-images.mjs` is deliberately manual/idempotent; there are 1,112 local product images and no external product-photo references. Re-run via the manual `ATTIRE MART one-time local photo migration` workflow only when explicitly rebuilding original assets.
+- `scripts/migrate-original-images.mjs` is idempotent and can recover missing local files from the pinned per-image original URL map; the recovery workflow can also be started manually.
 
 The same-domain image assets and system-font stacks avoid external image/font requests. QA checks every local product image and verifies that checkout/order browsing does not clear unrelated cart items.
 

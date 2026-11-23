@@ -12,11 +12,29 @@ const files=["01","02","03","04"].map(i=>"part-"+i+".json");
 const catalogs=await Promise.all(files.map(async file=>JSON.parse(await fs.readFile(path.join(dataDir,file),"utf8"))));
 const catalog=JSON.parse(await fs.readFile(path.join(dataDir,"checkout-catalog.json"),"utf8"));
 const allowed=/^https:\/\/cdn\.shopify\.com\/s\/files\/1\/1042\/1220\/1653\/files\/[A-Za-z0-9._-]+\.(?:jpg|jpeg|png|webp)\?v=\d+$/;
+// The catalogue stores the exact, authorised originals even after its public
+// image paths have been converted to /media/*.webp. Recover incomplete uploads
+// from this map without substituting any other product's photo.
+const originalSources=new Map();
+for(const shard of catalogs)for(const [local,url] of Object.entries(shard.sources||{})){
+ if(!/^\\/media\\/[A-Za-z0-9._-]+\\.webp$/.test(local)||!allowed.test(url))
+  throw Error("Invalid original image mapping: "+local);
+ const filename=path.posix.basename(new URL(url).pathname).replace(/\\.(jpg|jpeg|png|webp)$/i,".webp");
+ if(local!=="/media/"+filename)throw Error("Original image filename mismatch: "+local);
+ const prior=originalSources.get(local);
+ if(prior&&prior!==url)throw Error("Conflicting original image mapping: "+local);
+ originalSources.set(local,url);
+}
 const requested=new Map();
 const assetPath=url=>{
  if(typeof url!=="string")throw Error("Missing image source");
  if(url.startsWith("/media/")){
   if(!/^\/media\/[A-Za-z0-9._-]+\.webp$/.test(url))throw Error("Invalid local image "+url);
+  const original=originalSources.get(url);
+  if(!original)throw Error("Missing approved image origin for "+url);
+  const previous=requested.get(url);
+  if(previous&&previous!==original)throw Error("Conflicting source for "+url);
+  requested.set(url,original);
   return url;
  }
  if(!allowed.test(url))throw Error("Unapproved image origin "+url);
@@ -34,6 +52,7 @@ for(const shard of catalogs)for(const p of Object.values(shard.products||{})){
 for(const v of Object.values(catalog.variants))assetPath(v.image);
 await fs.mkdir(mediaDir,{recursive:true});
 const queue=[...requested.entries()];
+if(queue.length!==1112)throw Error("Expected 1112 unique original catalogue images; found "+queue.length);
 let downloaded=0,skipped=0,bytes=0,failures=[];
 async function download([local,url]){
  const dest=path.join(root,local.slice(1));
