@@ -1,0 +1,57 @@
+name: ATTIRE MART full-site visual and SEO audit
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/qa-all-pages.yml'
+      - 'scripts/qa-all-pages.mjs'
+      - 'scripts/test-payu-callback.mjs'
+      - 'styles.css'
+      - 'app.js'
+      - 'checkout.js'
+      - 'api/**'
+      - 'lib/**'
+      - 'vercel.json'
+      - 'scripts/build-public.mjs'
+      - 'scripts/build-seo.mjs'
+      - 'data/**'
+      - 'media/**'
+      - 'scripts/test-product-images.mjs'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  full-site:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Install website, browser engines and dependencies
+        run: |
+          npm install --no-audit --no-fund --package-lock=false
+          npm install --no-save --no-audit --no-fund --package-lock=false playwright@1.58.0
+          npx playwright install --with-deps chromium firefox webkit
+      - name: Build SEO routes and verify JS
+        run: |
+          npm run check
+          npm run build
+          node scripts/test-checkout.mjs
+          npm run test:callback
+          npm run test:images
+      - name: Test all page templates, 23 responsive widths, all product and legal URLs
+        run: node scripts/qa-all-pages.mjs
+      - name: Save responsive screenshots for visual review
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: attiremart-full-site-visual-audit
+          path: qa-screenshots/
+          retention-days: 14
+          if-no-files-found: ignore

@@ -1,0 +1,41 @@
+name: ATTIRE MART one-time local photo migration
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: attiremart-original-media-migration
+  cancel-in-progress: false
+jobs:
+  restore-all-product-photos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Check out exact commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Install image conversion and test dependencies
+        run: npm install --no-audit --no-fund --no-package-lock sharp@0.34.3
+      - name: Fetch and optimize every original product image
+        run: node scripts/migrate-original-images.mjs
+      - name: Verify all photos are local and no variant changed product
+        run: |
+          npm run test:images
+          npm run build
+          npm run check:vercel
+      - name: Commit complete verified image migration only
+        run: |
+          set -euo pipefail
+          git config user.name "attiremart-photo-migration[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add media/ data/part-01.json data/part-02.json data/part-03.json data/part-04.json data/checkout-catalog.json data/local-media-lock.json
+          git diff --cached --check
+          git diff --cached --quiet && { echo "All photos were already local"; exit 0; }
+          git commit -m "Store all 1112 product images locally and sync 878 variants"
+          git push origin HEAD:main

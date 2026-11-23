@@ -1,0 +1,113 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "Authoritative guest ecommerce order and PayU payment record stored server-side via Firebase Admin SDK.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique ATTIRE MART transaction ID (AM...).",
+          "minLength": 12,
+          "maxLength": 62,
+          "pattern": "^AM[A-Za-z0-9_-]{10,60}$"
+        },
+        "status": {
+          "type": "string",
+          "description": "Authoritative payment verification status.",
+          "enum": ["pending", "paid", "cod_advance_paid", "failed"]
+        },
+        "fulfillmentStatus": {
+          "type": "string",
+          "description": "Order fulfillment lifecycle state.",
+          "enum": ["awaiting_payment", "unfulfilled", "fulfilled", "cancelled", "payment_failed"]
+        },
+        "paymentMethod": {
+          "type": "string",
+          "description": "Selected payment method.",
+          "enum": ["prepaid", "cod"]
+        },
+        "currency": {
+          "type": "string",
+          "description": "ISO currency code.",
+          "enum": ["INR"]
+        },
+        "total": {
+          "type": "number",
+          "description": "Server-calculated order subtotal and total in INR."
+        },
+        "payAmount": {
+          "type": "number",
+          "description": "Authoritative amount payable online (full total for prepaid, advance for COD)."
+        },
+        "balanceDue": {
+          "type": "number",
+          "description": "Remaining cash balance due on delivery."
+        },
+        "payuId": {
+          "type": "string",
+          "description": "Verified PayU mihpayid reference.",
+          "maxLength": 120
+        },
+        "accessTokenHash": {
+          "type": "string",
+          "description": "SHA-256 hex digest of the cryptographically random guest order access token.",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "source": {
+          "type": "string",
+          "description": "Originating checkout channel.",
+          "maxLength": 64
+        },
+        "customer": {
+          "type": "object",
+          "description": "Private customer delivery and contact details."
+        },
+        "items": {
+          "type": "array",
+          "description": "Server-verified line items with product IDs, titles, selected sizes/colours, quantities and unit prices."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated last update timestamp."
+        },
+        "paymentVerifiedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-generated timestamp when PayU payment verification completed."
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "fulfillmentStatus",
+        "paymentMethod",
+        "currency",
+        "total",
+        "payAmount",
+        "balanceDue",
+        "accessTokenHash",
+        "customer",
+        "items",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/orders/{transactionId}": {
+      "schema": {
+        "$ref": "#/entities/Order"
+      },
+      "description": "Server-only collection storing guest orders and PayU reconciliation records. Direct client SDK reads and writes are denied."
+    }
+  }
+}

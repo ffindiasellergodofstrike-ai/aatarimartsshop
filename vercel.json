@@ -1,0 +1,95 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "framework": null,
+  "buildCommand": "npm run build",
+  "outputDirectory": "publish",
+  "cleanUrls": false,
+  "functions": {
+    "api/*.mjs": {
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/products/:handle",
+      "destination": "/products/:handle/index.html"
+    },
+    {
+      "source": "/collections/:handle",
+      "destination": "/collections/:handle/index.html"
+    },
+    {
+      "source": "/pages/:handle",
+      "destination": "/pages/:handle/index.html"
+    },
+    {
+      "source": "/cart",
+      "destination": "/cart/index.html"
+    },
+    {
+      "source": "/checkout",
+      "destination": "/checkout/index.html"
+    },
+    {
+      "source": "/orders",
+      "destination": "/orders/index.html"
+    },
+    {
+      "source": "/order-status",
+      "destination": "/order-status/index.html"
+    },
+    {
+      "source": "/wishlist",
+      "destination": "/wishlist/index.html"
+    },
+    {
+      "source": "/search",
+      "destination": "/search/index.html"
+    },
+    {
+      "source": "/account",
+      "destination": "/account/index.html"
+    },
+    {
+      "source": "/about",
+      "destination": "/about/index.html"
+    },
+    {
+      "source": "/contact",
+      "destination": "/contact/index.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "private, no-store"
+        },
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow, noarchive"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        }
+      ]
+    }
+  ]
+}

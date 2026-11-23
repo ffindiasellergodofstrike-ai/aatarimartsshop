@@ -1,0 +1,72 @@
+name: ATTIRE MART Vercel build and API validation
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - 'lib/**'
+      - 'app.js'
+      - 'checkout.js'
+      - 'index.html'
+      - 'styles.css'
+      - 'package.json'
+      - 'vercel.json'
+      - 'firestore.rules'
+      - 'firebase-blueprint.json'
+      - 'scripts/build-public.mjs'
+      - 'scripts/test-product-images.mjs'
+      - 'scripts/test-rate-limit.mjs'
+      - 'scripts/test-payu-callback.mjs'
+      - 'scripts/enable-rate-limit-ttl.sh'
+      - 'media/**'
+      - 'scripts/build-seo.mjs'
+      - 'scripts/test-checkout.mjs'
+      - 'scripts/test-storage.mjs'
+      - 'scripts/test-vercel-api.mjs'
+      - 'data/**'
+      - '.github/workflows/check-standalone-store.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Install Vercel API dependencies
+        run: npm install --no-audit --no-fund --package-lock=false
+      - name: Validate JavaScript, Firestore rules, and PayU hashes
+        run: |
+          npm run lint
+          node scripts/test-checkout.mjs
+          npm run test:storage
+          npm run test:rate-limit
+          npm run test:callback
+      - name: Bundle native Vercel Functions
+        run: npx --yes esbuild@0.25.12 api/create-order.mjs api/order-status.mjs api/payu-callback.mjs --bundle --platform=node --format=esm --target=node22 --packages=external --outdir=/tmp/attiremart-apis
+      - name: Build pages, images, sitemap
+        run: npm run build
+      - name: Verify every product image, colour option and checkout mapping
+        run: npm run test:images
+      - name: Run HTTP API and Firestore safety tests
+        run: npm run check:vercel
+      - name: Confirm public artifacts exclude private server code
+        run: |
+          test ! -e publish/api
+          test ! -e publish/lib
+          test ! -e publish/data/checkout-catalog.json
+          test ! -e publish/firebase-applet-config.json
+          test ! -e publish/firestore.rules
+          test ! -e publish/_redirects
+          expected="$(find media -name '*.webp' -type f | wc -l)"
+          actual="$(find publish/media -name '*.webp' -type f | wc -l)"
+          test "$expected" -gt 0
+          test "$actual" -eq "$expected"
+          echo "Published $actual self-hosted original product WebP images."
+          echo "Vercel API + Firestore + storefront validated."
