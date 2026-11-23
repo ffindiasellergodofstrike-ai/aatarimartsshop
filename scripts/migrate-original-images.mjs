@@ -17,9 +17,9 @@ const allowed=/^https:\/\/cdn\.shopify\.com\/s\/files\/1\/1042\/1220\/1653\/file
 // from this map without substituting any other product's photo.
 const originalSources=new Map();
 for(const shard of catalogs)for(const [local,url] of Object.entries(shard.sources||{})){
- if(!/^\\/media\\/[A-Za-z0-9._-]+\\.webp$/.test(local)||!allowed.test(url))
+ if(!/^\/media\/[A-Za-z0-9._-]+\.webp$/.test(local)||!allowed.test(url))
   throw Error("Invalid original image mapping: "+local);
- const filename=path.posix.basename(new URL(url).pathname).replace(/\\.(jpg|jpeg|png|webp)$/i,".webp");
+ const filename=path.posix.basename(new URL(url).pathname).replace(/\.(jpg|jpeg|png|webp)$/i,".webp");
  if(local!=="/media/"+filename)throw Error("Original image filename mismatch: "+local);
  const prior=originalSources.get(local);
  if(prior&&prior!==url)throw Error("Conflicting original image mapping: "+local);
