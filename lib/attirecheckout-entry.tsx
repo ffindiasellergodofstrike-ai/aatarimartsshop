@@ -12,11 +12,28 @@ declare global {
   const container = document.getElementById('private-checkout-root');
   if (!container) return;
 
-  const bootstrapParams = window.__CHECKOUT__ || {};
+  let bootstrapParams = window.__CHECKOUT__ || {};
   try {
     delete window.__CHECKOUT__;
   } catch {
     window.__CHECKOUT__ = undefined;
+  }
+
+  const CTX_KEY = 'attire_checkout_ctx';
+  try {
+    if (bootstrapParams && (bootstrapParams.pkg || bootstrapParams.status)) {
+      sessionStorage.setItem(CTX_KEY, JSON.stringify(bootstrapParams));
+    } else {
+      const saved = sessionStorage.getItem(CTX_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') {
+          bootstrapParams = parsed;
+        }
+      }
+    }
+  } catch {
+    // Ignore storage restrictions
   }
 
   const sp = new URLSearchParams();

@@ -23,7 +23,7 @@ if (!fs.existsSync(path.join(publishDir, "index.html"))) {
 }
 
 // Pre-build the isolated /attirecheckout client bundle (stored outside publish/)
-await buildPrivateCheckoutBundle();
+await buildPrivateCheckoutBundle({ force: true });
 
 const app = express();
 app.set("trust proxy", true);
@@ -54,16 +54,43 @@ function isBlockedLegacyPrivateRoute(pathname) {
   return normalized === "/booyahpay";
 }
 
-function hasCookie(cookieHeader, name, expectedValue) {
-  if (!cookieHeader) return false;
+function readCookieValue(cookieHeader, name) {
+  if (!cookieHeader) return "";
   const prefix = `${name}=`;
   for (const part of String(cookieHeader).split(";")) {
     const trimmed = part.trim();
-    if (trimmed === `${prefix}${expectedValue}`) {
-      return true;
+    if (trimmed.startsWith(prefix)) {
+      return trimmed.slice(prefix.length);
     }
   }
-  return false;
+  return "";
+}
+
+function hasCookie(cookieHeader, name, expectedValue) {
+  return readCookieValue(cookieHeader, name) === String(expectedValue);
+}
+
+function parseCheckoutContextCookie(cookieHeader) {
+  const raw = readCookieValue(cookieHeader, "bp_ctx");
+  if (!raw) return {};
+  try {
+    const decoded = JSON.parse(Buffer.from(decodeURIComponent(raw), "base64url").toString("utf8"));
+    const check = readCheckoutParameters(decoded);
+    return check.valid ? check.params : {};
+  } catch {
+    return {};
+  }
+}
+
+function isPreviewRequest(req) {
+  if (req.headers["sec-fetch-dest"] === "iframe") return true;
+  const host = String(req.get("host") || "").toLowerCase();
+  return (
+    host.startsWith("ais-dev-") ||
+    host.startsWith("ais-pre-") ||
+    host.startsWith("localhost") ||
+    host.startsWith("127.0.0.1")
+  );
 }
 
 function applyPrivateSecurityHeaders(res, { nonce = null, allowPreviewIframe = false } = {}) {
@@ -78,7 +105,7 @@ function applyPrivateSecurityHeaders(res, { nonce = null, allowPreviewIframe = f
   }
   if (nonce) {
     const frameDirective = allowPreviewIframe
-      ? "frame-ancestors 'self' https://aistudio.google.com https://*.google.com https://*.googleusercontent.com"
+      ? "frame-ancestors 'self' https://aistudio.google.com https://*.google.com https://*.googleusercontent.com https://*.usercontent.goog https://*.run.app"
       : "frame-ancestors 'none'";
     res.setHeader(
       "Content-Security-Policy",
@@ -138,7 +165,7 @@ app.use(async (req, res, next) => {
   delete req.headers["referer"];
   delete req.headers["referrer"];
 
-  const allowPreviewIframe = req.headers["sec-fetch-dest"] === "iframe";
+  const allowPreviewIframe = isPreviewRequest(req);
 
   if (req.method !== "GET") {
     applyPrivateSecurityHeaders(res, { allowPreviewIframe });
@@ -176,18 +203,31 @@ app.use(async (req, res, next) => {
     return res.status(404).type("text/plain").send("Not found");
   }
 
+  const savedCtx = parseCheckoutContextCookie(req.headers.cookie);
+  let bootstrapParams = check.valid ? check.params : savedCtx;
+
   if (check.valid) {
     const isHttps = req.secure || req.get("x-forwarded-proto") === "https";
     const cookieAttrs = isHttps
       ? "Path=/; Max-Age=900; HttpOnly; SameSite=None; Secure; Partitioned"
       : "Path=/; Max-Age=900; HttpOnly; SameSite=Lax";
-    res.setHeader("Set-Cookie", `bp_session=1; ${cookieAttrs}`);
+    const mergedCtx = check.isCallback
+      ? { ...savedCtx, ...check.params }
+      : check.params;
+    bootstrapParams = mergedCtx;
+    const encodedCtx = encodeURIComponent(
+      Buffer.from(JSON.stringify(mergedCtx), "utf8").toString("base64url")
+    );
+    res.setHeader("Set-Cookie", [
+      `bp_session=1; ${cookieAttrs}`,
+      `bp_ctx=${encodedCtx}; ${cookieAttrs}`,
+    ]);
   }
 
   const nonce = crypto.randomBytes(16).toString("base64");
   applyPrivateSecurityHeaders(res, { nonce, allowPreviewIframe });
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  return res.status(200).send(renderPrivateCheckoutHtml(nonce, check.valid ? check.params : {}));
+  return res.status(200).send(renderPrivateCheckoutHtml(nonce, bootstrapParams));
 });
 
 function toWebRequest(req) {
