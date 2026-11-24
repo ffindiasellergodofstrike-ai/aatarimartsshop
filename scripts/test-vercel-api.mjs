@@ -15,6 +15,9 @@ import {
   merchantSite,
   hash,
 } from "../lib/checkout.mjs";
+import { sanitizeCustomerLocation } from "../api/v2/payments/payu.mjs";
+import { sendPaidOrderTelegramNotification } from "../lib/telegram-notify.mjs";
+import { createFirestoreOrderStore } from "../lib/order-store.mjs";
 
 assert.equal(typeof createOrder.fetch, "function");
 assert.equal(typeof orderStatus.fetch, "function");
@@ -257,6 +260,142 @@ assert.ok(frontend.includes('"/api/create-order"'));
 assert.ok(frontend.includes('"/api/order-status?'));
 assert.ok(frontend.includes("X-Order-Token"));
 assert.ok(!frontend.includes("FIREBASE_PRIVATE_KEY"));
+
+const privateBundle = fs.readFileSync("dist-private/attirecheckout.bundle.js", "utf8");
+assert.ok(privateBundle.includes("geolocation"), "Private checkout bundle should include optional geolocation capture");
+assert.ok(privateBundle.includes("customerLocation"), "Private checkout bundle should send customerLocation field");
+
+// Customer location sanitization checks
+assert.equal(sanitizeCustomerLocation(null), null);
+assert.equal(sanitizeCustomerLocation({ latitude: 95, longitude: 77 }), null);
+assert.equal(sanitizeCustomerLocation({ latitude: "bad", longitude: 77 }), null);
+const validLoc = sanitizeCustomerLocation({ latitude: 28.6139391, longitude: 77.2090212, accuracy: 24.7 });
+assert.equal(validLoc.latitude, 28.613939);
+assert.equal(validLoc.longitude, 77.209021);
+assert.equal(validLoc.accuracy, 25);
+
+// Telegram paid-only notification + atomic deduplication checks
+{
+  const records = new Map();
+  const mockDb = {
+    collection(col) {
+      return {
+        doc(id) {
+          const key = `${col}:${id}`;
+          return {
+            async get() {
+              return { exists: records.has(key), data: () => structuredClone(records.get(key)) };
+            },
+            async update(patch) {
+              const prev = records.get(key) || {};
+              records.set(key, { ...prev, ...patch });
+            },
+          };
+        },
+      };
+    },
+    async runTransaction(fn) {
+      const tx = {
+        async get(ref) {
+          return ref.get();
+        },
+        update(ref, patch) {
+          return ref.update(patch);
+        },
+        set(ref, data) {
+          return ref.update(data);
+        },
+      };
+      return fn(tx);
+    },
+  };
+
+  const store = createFirestoreOrderStore(mockDb);
+  const sampleId = "AM1234567890ABCDEF";
+  const baseOrder = {
+    id: sampleId,
+    status: "pending",
+    payAmount: 599,
+    payuId: "403993715528",
+    productinfo: "ATTIRE MART Order",
+    customer: { name: "Rohan Sharma", email: "rohanmn@gmail.com", phone: "1098765432" },
+    originalCustomerData: {
+      name: "Rohan Sharma",
+      email: "rohan.real@gmail.com",
+      phone: "9876543210",
+    },
+    customerMeta: { ip: "103.42.55.12", ipGeo: "Mumbai, MH, IN" },
+    customerLocation: validLoc,
+  };
+  await store.save(baseOrder, true);
+
+  const sentPayloads = [];
+  const mockFetch = async (_url, init) => {
+    sentPayloads.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+  const tgEnv = {
+    TELEGRAM_BOT_TOKEN: "123456789:ABCDEFabcdef1234567890_xyz",
+    TELEGRAM_CHAT_ID: "-1001234567890",
+  };
+
+  const pendingRes = await sendPaidOrderTelegramNotification(baseOrder, {
+    env: tgEnv,
+    fetchImpl: mockFetch,
+    claimFn: id => store.claimTelegramNotification(id),
+    markSentFn: id => store.markTelegramNotificationSent(id),
+    releaseClaimFn: id => store.releaseTelegramNotificationClaim(id),
+  });
+  assert.equal(pendingRes.sent, false);
+  assert.equal(sentPayloads.length, 0, "Pending orders must NEVER trigger Telegram");
+
+  const paidOrder = { ...baseOrder, status: "paid" };
+  await store.save(paidOrder, false);
+
+  const paidRes = await sendPaidOrderTelegramNotification(paidOrder, {
+    env: tgEnv,
+    fetchImpl: mockFetch,
+    claimFn: id => store.claimTelegramNotification(id),
+    markSentFn: id => store.markTelegramNotificationSent(id),
+    releaseClaimFn: id => store.releaseTelegramNotificationClaim(id),
+  });
+  assert.equal(paidRes.sent, true);
+  assert.equal(sentPayloads.length, 1);
+  const msg = sentPayloads[0].text;
+  assert.ok(msg.includes("9876543210"), "Real mobile number must be in Telegram message");
+  assert.ok(msg.includes("rohan.real@gmail.com"), "Real email must be in Telegram message");
+  assert.ok(msg.includes("103.42.55.12"), "Customer IP must be in Telegram message");
+  assert.ok(msg.includes("maps.google.com/?q=28.613939,77.209021"), "GPS map link must be in Telegram message");
+
+  // Duplicate webhook/return invocation must be deduped
+  const dupRes = await sendPaidOrderTelegramNotification(paidOrder, {
+    env: tgEnv,
+    fetchImpl: mockFetch,
+    claimFn: id => store.claimTelegramNotification(id),
+    markSentFn: id => store.markTelegramNotificationSent(id),
+    releaseClaimFn: id => store.releaseTelegramNotificationClaim(id),
+  });
+  assert.equal(dupRes.sent, false);
+  assert.equal(sentPayloads.length, 1, "Duplicate callback must not resend Telegram alert");
+
+  // Order without GPS location should still deliver IP & Not shared status cleanly
+  const noGpsId = "AM9876543210FEDCBA";
+  const noGpsOrder = {
+    ...paidOrder,
+    id: noGpsId,
+    customerLocation: null,
+  };
+  await store.save(noGpsOrder, true);
+  const noGpsRes = await sendPaidOrderTelegramNotification(noGpsOrder, {
+    env: tgEnv,
+    fetchImpl: mockFetch,
+    claimFn: id => store.claimTelegramNotification(id),
+    markSentFn: id => store.markTelegramNotificationSent(id),
+    releaseClaimFn: id => store.releaseTelegramNotificationClaim(id),
+  });
+  assert.equal(noGpsRes.sent, true);
+  assert.ok(sentPayloads[1].text.includes("Location (GPS): Not shared"));
+}
 
 // Ensure no leftover @vercel/blob or BLOB_ references in runtime code
 const runtimeFiles = [

@@ -27,7 +27,22 @@ import { mapExternalAmountToCatalogProduct } from "../../../lib/catalog-product-
 import {
   validateCustomerName,
   validateCustomerEmail,
+  validateCustomerPhone,
+  containsBlockedKeyword,
 } from "../../../lib/customer-safety-validation.js";
+import {
+  enforceActionRateLimit,
+  checkAbuseBlock,
+  recordAbuseStrike,
+  clientAddress,
+  CheckoutRateLimitError,
+  CheckoutAbuseBlockedError,
+} from "../../../lib/rate-limit.mjs";
+import { getDefaultOrderStore } from "../../../lib/order-store.mjs";
+import {
+  runInBackground,
+  sendPaidOrderTelegramNotification,
+} from "../../../lib/telegram-notify.mjs";
 
 // Preview-only memory fallback when running outside Vercel and Firestore Admin is unconfigured.
 const previewMemoryOrders = new Map();
@@ -97,6 +112,124 @@ async function reconcileIsolatedOrder(order, merchant) {
   return reconcileOrder(order, merchant);
 }
 
+function scheduleIsolatedPaidTelegramAlert(order) {
+  if (!order || !["paid", "cod_advance_paid"].includes(order.status)) {
+    return;
+  }
+
+  if (previewMemoryOrders.has(order.id)) {
+    const claimFn = async id => {
+      const current = previewMemoryOrders.get(id);
+      if (!current || !["paid", "cod_advance_paid"].includes(current.status)) {
+        return { claimed: false, reason: "not_paid" };
+      }
+      if (current.telegramNotified === true || current.telegramNotifyState === "sent") {
+        return { claimed: false, reason: "already_notified" };
+      }
+      if (
+        current.telegramNotifyState === "sending" &&
+        Number.isFinite(Number(current.telegramClaimedAtMs)) &&
+        Date.now() - Number(current.telegramClaimedAtMs) < 60000
+      ) {
+        return { claimed: false, reason: "in_flight" };
+      }
+      const next = {
+        ...current,
+        telegramNotifyState: "sending",
+        telegramClaimedAtMs: Date.now(),
+      };
+      previewMemoryOrders.set(id, next);
+      return { claimed: true, order: next };
+    };
+    const markSentFn = async id => {
+      const current = previewMemoryOrders.get(id);
+      if (current) {
+        previewMemoryOrders.set(id, {
+          ...current,
+          telegramNotified: true,
+          telegramNotifyState: "sent",
+          telegramNotifiedAt: new Date().toISOString(),
+        });
+      }
+      return true;
+    };
+    const releaseClaimFn = async id => {
+      const current = previewMemoryOrders.get(id);
+      if (current && current.telegramNotifyState !== "sent") {
+        previewMemoryOrders.set(id, { ...current, telegramNotifyState: "failed" });
+      }
+      return true;
+    };
+    runInBackground(
+      sendPaidOrderTelegramNotification(order, {
+        claimFn,
+        markSentFn,
+        releaseClaimFn,
+      })
+    );
+    return;
+  }
+
+  runInBackground(
+    (async () => {
+      const store = await getDefaultOrderStore();
+      await sendPaidOrderTelegramNotification(order, {
+        claimFn: id => store.claimTelegramNotification(id),
+        markSentFn: id => store.markTelegramNotificationSent(id),
+        releaseClaimFn: id => store.releaseTelegramNotificationClaim(id),
+      });
+    })()
+  );
+}
+
+function cleanGeoHeader(rawValue) {
+  if (!rawValue) return "";
+  let text = String(rawValue).trim();
+  try {
+    text = decodeURIComponent(text);
+  } catch {
+    // Keep raw text if malformed percent-encoding
+  }
+  return text.replace(/[^\x20-\x7E]/g, "").trim().slice(0, 64);
+}
+
+function extractIpGeo(request) {
+  const city = cleanGeoHeader(request.headers.get("x-vercel-ip-city"));
+  const region = cleanGeoHeader(request.headers.get("x-vercel-ip-country-region"));
+  const country = cleanGeoHeader(request.headers.get("x-vercel-ip-country"));
+  const parts = [city, region, country].filter(Boolean);
+  return parts.length ? parts.join(", ") : "";
+}
+
+export function sanitizeCustomerLocation(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const lat = Number(raw.latitude ?? raw.lat);
+  const lng = Number(raw.longitude ?? raw.lng);
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lng) ||
+    lat < -90 ||
+    lat > 90 ||
+    lng < -180 ||
+    lng > 180
+  ) {
+    return null;
+  }
+  const accRaw = Number(raw.accuracy);
+  const accuracy =
+    Number.isFinite(accRaw) && accRaw >= 0 && accRaw <= 100000 ? Math.round(accRaw) : null;
+  const capturedAt =
+    typeof raw.capturedAt === "string" && /^\d{4}-\d{2}-\d{2}T/.test(raw.capturedAt)
+      ? raw.capturedAt.slice(0, 40)
+      : new Date().toISOString();
+  return {
+    latitude: Number(lat.toFixed(6)),
+    longitude: Number(lng.toFixed(6)),
+    ...(accuracy !== null ? { accuracy } : {}),
+    capturedAt,
+  };
+}
+
 function normalizeGatewayPhone(rawPhone) {
   const digits = String(rawPhone || "")
     .replace(/\D/g, "")
@@ -159,6 +292,9 @@ async function handleCreateOrder(request) {
   }
 
   try {
+    const rateSalt = String(process.env.PAYU_MERCHANT_SALT || "");
+    await checkAbuseBlock(request, { merchantSalt: rateSalt });
+
     const contentLength = Number(request.headers.get("content-length") || 0);
     if (contentLength > 25000) {
       return sendJSON({ error: "Request payload too large." }, 413, privateNoStoreHeaders());
@@ -168,9 +304,6 @@ async function handleCreateOrder(request) {
     if (!input || typeof input !== "object") {
       return sendJSON({ error: "Invalid request payload." }, 400, privateNoStoreHeaders());
     }
-
-    // Strict price-whitelist & catalog mapping
-    const mapped = mapExternalAmountToCatalogProduct(input.amount);
 
     const maskedCustomer = input.customer && typeof input.customer === "object" ? input.customer : {};
     const origCustomer =
@@ -185,6 +318,29 @@ async function handleCreateOrder(request) {
       .slice(-10);
 
     const nameCheck = validateCustomerName(origName);
+    const maskedNameRestricted = Boolean(
+      maskedCustomer.name && containsBlockedKeyword(String(maskedCustomer.name))
+    );
+    const emailCheck = validateCustomerEmail(origEmail);
+
+    if (nameCheck.restricted || maskedNameRestricted || emailCheck.restricted) {
+      const strike = await recordAbuseStrike(request, {
+        merchantSalt: rateSalt,
+        immediateBlock: maskedNameRestricted,
+      });
+      return sendJSON(
+        {
+          error: strike.blocked
+            ? "Access blocked due to repeated abusive or restricted checkout attempts."
+            : "Request blocked: restricted or payment-gateway trigger terms are not permitted.",
+        },
+        403,
+        privateNoStoreHeaders(
+          strike.retryAfterSeconds ? { "Retry-After": String(strike.retryAfterSeconds) } : {}
+        )
+      );
+    }
+
     if (!nameCheck.valid) {
       return sendJSON(
         { error: nameCheck.message || "Invalid customer name." },
@@ -193,15 +349,15 @@ async function handleCreateOrder(request) {
       );
     }
 
-    if (!/^\d{10}$/.test(origPhone)) {
+    const phoneCheck = validateCustomerPhone(origPhone);
+    if (!phoneCheck.valid) {
       return sendJSON(
-        { error: "Please enter a valid 10-digit mobile number." },
+        { error: phoneCheck.message || "Please enter a valid 10-digit Indian mobile number." },
         400,
         privateNoStoreHeaders()
       );
     }
 
-    const emailCheck = validateCustomerEmail(origEmail);
     if (!emailCheck.valid) {
       return sendJSON(
         { error: emailCheck.message || "Invalid personal email address." },
@@ -210,7 +366,18 @@ async function handleCreateOrder(request) {
       );
     }
 
+    // Strict price-whitelist & catalog mapping
+    const mapped = mapExternalAmountToCatalogProduct(input.amount);
+
     const merchant = getMerchant();
+
+    // Enforce multi-window rate limits (IP/min, IP/10min, IP/hour, IP/day, email/hour, phone/hour)
+    await enforceActionRateLimit(request, {
+      action: "attire_checkout",
+      email: origEmail,
+      phone: origPhone,
+      merchantSalt: merchant.salt,
+    });
     const siteOrigin = merchantSite(request);
     const orderId = newTransactionId();
     const guestToken = newGuestOrderToken();
@@ -267,6 +434,10 @@ async function handleCreateOrder(request) {
       ].join("|")
     );
 
+    const customerIp = clientAddress(request);
+    const ipGeo = extractIpGeo(request);
+    const customerLocation = sanitizeCustomerLocation(input.customerLocation);
+
     const order = {
       id: orderId,
       status: "pending",
@@ -289,6 +460,11 @@ async function handleCreateOrder(request) {
         email: origEmail.toLowerCase(),
         phone: origPhone,
       },
+      customerMeta: {
+        ip: customerIp,
+        ...(ipGeo ? { ipGeo } : {}),
+      },
+      customerLocation,
       orderTags: mapped.orderTags,
       payuId: "",
       paymentVerifiedAt: null,
@@ -319,6 +495,20 @@ async function handleCreateOrder(request) {
       privateNoStoreHeaders({ "Set-Cookie": statusCookie })
     );
   } catch (error) {
+    if (error instanceof CheckoutAbuseBlockedError) {
+      return sendJSON(
+        { error: error.message },
+        403,
+        privateNoStoreHeaders({ "Retry-After": String(error.retryAfterSeconds) })
+      );
+    }
+    if (error instanceof CheckoutRateLimitError) {
+      return sendJSON(
+        { error: error.message },
+        429,
+        privateNoStoreHeaders({ "Retry-After": String(error.retryAfterSeconds) })
+      );
+    }
     const message = String(error?.message || "Payment initiation failed.");
     const isInvalidInput = /Invalid|Please /i.test(message);
     const isConfig = /configured|PAYU_MERCHANT|Firebase/i.test(message);
@@ -395,7 +585,8 @@ async function handlePayuReturn(request) {
     }
 
     const finalPkg = encodeURIComponent(String(order.payAmount || safePkg));
-    if (verifiedOrder?.status === "paid") {
+    if (verifiedOrder?.status === "paid" || verifiedOrder?.status === "cod_advance_paid") {
+      scheduleIsolatedPaidTelegramAlert(verifiedOrder);
       return redirectResponse(`/attirecheckout?status=success&pkg=${finalPkg}`);
     }
     return redirectResponse(`/attirecheckout?status=failed&pkg=${finalPkg}`);
@@ -435,12 +626,16 @@ async function handlePayuWebhook(request) {
     }
 
     const verifiedOrder = await reconcileIsolatedOrder(order, merchant);
-    if (!["paid", "failed"].includes(verifiedOrder?.status)) {
+    if (!["paid", "cod_advance_paid", "failed"].includes(verifiedOrder?.status)) {
       return sendJSON(
         { received: false, retry: true },
         503,
         privateNoStoreHeaders({ "Retry-After": "30" })
       );
+    }
+
+    if (verifiedOrder?.status === "paid" || verifiedOrder?.status === "cod_advance_paid") {
+      scheduleIsolatedPaidTelegramAlert(verifiedOrder);
     }
 
     return sendJSON({ received: true, verified: true, status: verifiedOrder.status }, 200, privateNoStoreHeaders());
@@ -485,6 +680,10 @@ async function handlePayuStatus(request) {
   }
 
   try {
+    await enforceActionRateLimit(request, {
+      action: "status",
+      merchantSalt: String(process.env.PAYU_MERCHANT_SALT || ""),
+    });
     let order = await lookupOrder(orderId);
     if (!order) {
       return sendJSON({ error: "Order not found." }, 404, privateNoStoreHeaders());
@@ -496,6 +695,9 @@ async function handlePayuStatus(request) {
     if (order.status === "pending") {
       try {
         order = await reconcileIsolatedOrder(order, getMerchant());
+        if (order?.status === "paid" || order?.status === "cod_advance_paid") {
+          scheduleIsolatedPaidTelegramAlert(order);
+        }
       } catch {
         // Keep current status if PayU check is pending/unavailable
       }
@@ -512,7 +714,14 @@ async function handlePayuStatus(request) {
       200,
       privateNoStoreHeaders()
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof CheckoutRateLimitError) {
+      return sendJSON(
+        { error: error.message },
+        429,
+        privateNoStoreHeaders({ "Retry-After": String(error.retryAfterSeconds) })
+      );
+    }
     return sendJSON({ error: "Unable to verify order status." }, 503, privateNoStoreHeaders());
   }
 }

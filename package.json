@@ -8,7 +8,7 @@
     "build": "node scripts/build-public.mjs",
     "start": "node server.mjs",
     "preview": "node server.mjs",
-    "check": "node --check server.mjs && node --check app.js && node --check checkout.js && node --check lib/order-store.mjs && node --check lib/checkout.mjs && node --check lib/customer-safety-validation.js && node --check lib/catalog-product-picker.js && node --check lib/checkout-access.js && node --check lib/private-checkout-bundle.mjs && node --check lib/private-checkout-handler.mjs && node --check api/create-order.mjs && node --check api/order-status.mjs && node --check api/payu-callback.mjs && node --check api/private-checkout.mjs && node --check api/v2/payments/payu.mjs && node --check api/v2/payments/payu/create-order.mjs && node --check api/v2/payments/payu/return.mjs && node --check api/v2/payments/payu/webhook.mjs && node --check api/v2/payments/payu/status.mjs && node --check lib/rate-limit.mjs && node --check scripts/test-payu-callback.mjs && node --check scripts/migrate-original-images.mjs",
+    "check": "node --check server.mjs && node --check app.js && node --check checkout.js && node --check lib/order-store.mjs && node --check lib/checkout.mjs && node --check lib/telegram-notify.mjs && node --check lib/customer-safety-validation.js && node --check lib/catalog-product-picker.js && node --check lib/checkout-access.js && node --check lib/private-checkout-bundle.mjs && node --check lib/private-checkout-handler.mjs && node --check api/create-order.mjs && node --check api/order-status.mjs && node --check api/payu-callback.mjs && node --check api/private-checkout.mjs && node --check api/v2/payments/payu.mjs && node --check api/v2/payments/payu/create-order.mjs && node --check api/v2/payments/payu/return.mjs && node --check api/v2/payments/payu/webhook.mjs && node --check api/v2/payments/payu/status.mjs && node --check lib/rate-limit.mjs && node --check scripts/test-payu-callback.mjs && node --check scripts/migrate-original-images.mjs",
     "lint": "npm run check && npx eslint firestore.rules",
     "check:vercel": "node scripts/test-vercel-api.mjs",
     "test:api": "node scripts/test-storage.mjs && npm run test:rate-limit && node scripts/test-checkout.mjs && npm run test:callback && npm run test:images && npm run build && node scripts/test-vercel-api.mjs",
@@ -20,6 +20,7 @@
   "dependencies": {
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@vercel/functions": "^3.11.3",
     "dotenv": "^17.2.3",
     "esbuild": "^0.28.2",
     "express": "^4.21.2",
