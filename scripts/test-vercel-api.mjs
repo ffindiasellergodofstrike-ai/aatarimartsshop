@@ -35,8 +35,7 @@ assert.equal(
   "Avoid legacy catch-all routes shadowing Vercel API handlers or SEO pages"
 );
 assert.equal(vercel.functions["api/*.mjs"].maxDuration, 30);
-assert.equal(vercel.functions["api/private-checkout.mjs"].maxDuration, 30);
-assert.equal(vercel.functions["api/private-checkout.mjs"].includeFiles, "dist-private/attirecheckout.bundle.js");
+assert.equal(vercel.functions["api/private-checkout.mjs"], undefined);
 assert.equal(vercel.functions["api/v2/payments/payu/*.mjs"].maxDuration, 30);
 
 assert.ok(fs.existsSync("publish/robots.txt"));

@@ -9,10 +9,6 @@
     "api/*.mjs": {
       "maxDuration": 30
     },
-    "api/private-checkout.mjs": {
-      "maxDuration": 30,
-      "includeFiles": "dist-private/attirecheckout.bundle.js"
-    },
     "api/v2/payments/payu/*.mjs": {
       "maxDuration": 30
     }
