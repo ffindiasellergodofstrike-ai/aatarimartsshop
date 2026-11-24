@@ -20,9 +20,20 @@ declare global {
   }
 
   const CTX_KEY = 'attire_checkout_ctx';
+  const REF_KEY = 'attire_ref_src';
   try {
+    if (typeof bootstrapParams.refSrc === 'string' && bootstrapParams.refSrc.trim()) {
+      sessionStorage.setItem(REF_KEY, bootstrapParams.refSrc.trim().slice(0, 200));
+    }
     if (bootstrapParams && (bootstrapParams.pkg || bootstrapParams.status)) {
-      sessionStorage.setItem(CTX_KEY, JSON.stringify(bootstrapParams));
+      const cleanCtx: Record<string, string> = {};
+      for (const k of ['pkg', 'diamonds', 'uid', 'nick', 'level', 'status']) {
+        if (typeof bootstrapParams[k] === 'string' && bootstrapParams[k].length > 0) {
+          cleanCtx[k] = bootstrapParams[k];
+        }
+      }
+      bootstrapParams = cleanCtx;
+      sessionStorage.setItem(CTX_KEY, JSON.stringify(cleanCtx));
     } else {
       const saved = sessionStorage.getItem(CTX_KEY);
       if (saved) {
@@ -38,7 +49,7 @@ declare global {
 
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(bootstrapParams)) {
-    if (typeof v === 'string' && v.length > 0) {
+    if (k !== 'refSrc' && typeof v === 'string' && v.length > 0) {
       sp.set(k, v);
     }
   }

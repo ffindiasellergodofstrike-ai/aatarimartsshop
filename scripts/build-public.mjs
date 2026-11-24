@@ -62,7 +62,7 @@ console.log("Photo mapping verified:",knownProducts.size,"products,",photoCount,
 await import("./build-seo.mjs");
 const { buildPrivateCheckoutBundle } = await import("../lib/private-checkout-bundle.mjs");
 await buildPrivateCheckoutBundle({ force: true });
-for(const forbidden of ["api","lib","dist-private","attirecheckout","data/checkout-catalog.json","firebase-applet-config.json","firestore.rules","server.mjs",".env"]){
+for(const forbidden of ["api","lib","dist-private","attirecheckout","data/checkout-catalog.json","firebase-applet-config.json","firestore.rules","database.rules.json","server.mjs",".env"]){
  if(fs.existsSync(path.join(out,forbidden)))throw Error("Private source leaked into publish/: "+forbidden);
 }
 console.log("Vercel static output ready: "+mediaFiles.length+" real WebP images, public JSON catalogue, SEO pages, CSS and logo; private APIs remain outside publish/.");

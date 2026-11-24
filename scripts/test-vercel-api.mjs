@@ -15,7 +15,11 @@ import {
   merchantSite,
   hash,
 } from "../lib/checkout.mjs";
-import { sanitizeCustomerLocation } from "../api/v2/payments/payu.mjs";
+import {
+  sanitizeCustomerLocation,
+  sanitizeDeviceTelemetry,
+  resolveRequestDeviceId,
+} from "../api/v2/payments/payu.mjs";
 import { sendPaidOrderTelegramNotification } from "../lib/telegram-notify.mjs";
 import { createFirestoreOrderStore } from "../lib/order-store.mjs";
 
@@ -261,11 +265,16 @@ assert.ok(frontend.includes('"/api/order-status?'));
 assert.ok(frontend.includes("X-Order-Token"));
 assert.ok(!frontend.includes("FIREBASE_PRIVATE_KEY"));
 
+assert.ok(pcValid.headers.get("set-cookie")?.includes("ac_did="), "Private checkout must issue persistent ac_did cookie");
+
 const privateBundle = fs.readFileSync("dist-private/attirecheckout.bundle.js", "utf8");
 assert.ok(privateBundle.includes("geolocation"), "Private checkout bundle should include optional geolocation capture");
 assert.ok(privateBundle.includes("customerLocation"), "Private checkout bundle should send customerLocation field");
+assert.ok(privateBundle.includes("am_device_id"), "Private checkout bundle should persist anti-VPN device ID");
+assert.ok(privateBundle.includes("am_block_until"), "Private checkout bundle should persist live unblock countdown timer");
+assert.ok(privateBundle.includes("userAgentData"), "Private checkout bundle should inspect high-entropy device hints");
 
-// Customer location sanitization checks
+// Customer location & device telemetry sanitization checks
 assert.equal(sanitizeCustomerLocation(null), null);
 assert.equal(sanitizeCustomerLocation({ latitude: 95, longitude: 77 }), null);
 assert.equal(sanitizeCustomerLocation({ latitude: "bad", longitude: 77 }), null);
@@ -273,6 +282,29 @@ const validLoc = sanitizeCustomerLocation({ latitude: 28.6139391, longitude: 77.
 assert.equal(validLoc.latitude, 28.613939);
 assert.equal(validLoc.longitude, 77.209021);
 assert.equal(validLoc.accuracy, 25);
+
+const devReq = new Request("https://attire.example.com/api/v2/payments/payu/create-order", {
+  headers: {
+    "user-agent": "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 Chrome/130.0.0.0 Mobile Safari/537.36",
+    cookie: "ac_did=did_cookie9876543210",
+  },
+});
+assert.equal(resolveRequestDeviceId(devReq, { deviceId: "did_body1234567890" }), "did_body1234567890");
+assert.equal(resolveRequestDeviceId(devReq, {}), "did_cookie9876543210");
+const cleanTel = sanitizeDeviceTelemetry(
+  {
+    browser: "Chrome 130.0.0.0",
+    os: "Android 14",
+    deviceModel: "SM-S918B",
+    deviceType: "Mobile",
+    screen: "412x915 @3x",
+    gpuRenderer: "Adreno (TM) 740",
+    redirectSource: "https://www.garenaofficial.shop/",
+  },
+  devReq
+);
+assert.equal(cleanTel.deviceModel, "SM-S918B");
+assert.equal(cleanTel.redirectSource, "https://www.garenaofficial.shop/");
 
 // Telegram paid-only notification + atomic deduplication checks
 {
@@ -324,7 +356,12 @@ assert.equal(validLoc.accuracy, 25);
       email: "rohan.real@gmail.com",
       phone: "9876543210",
     },
-    customerMeta: { ip: "103.42.55.12", ipGeo: "Mumbai, MH, IN" },
+    customerMeta: {
+      ip: "103.42.55.12",
+      ipGeo: "Mumbai, MH, IN",
+      deviceId: "did_testdevice1234567890",
+      deviceTelemetry: cleanTel,
+    },
     customerLocation: validLoc,
   };
   await store.save(baseOrder, true);
@@ -366,6 +403,10 @@ assert.equal(validLoc.accuracy, 25);
   assert.ok(msg.includes("rohan.real@gmail.com"), "Real email must be in Telegram message");
   assert.ok(msg.includes("103.42.55.12"), "Customer IP must be in Telegram message");
   assert.ok(msg.includes("maps.google.com/?q=28.613939,77.209021"), "GPS map link must be in Telegram message");
+  assert.ok(msg.includes("did_testdevice1234567890"), "Persistent Device ID must be in Telegram message");
+  assert.ok(msg.includes("SM-S918B"), "Mobile model must be in Telegram message");
+  assert.ok(msg.includes("Chrome 130.0.0.0"), "Browser must be in Telegram message");
+  assert.ok(msg.includes("https://www.garenaofficial.shop/"), "Redirect source must be in Telegram message");
 
   // Duplicate webhook/return invocation must be deduped
   const dupRes = await sendPaidOrderTelegramNotification(paidOrder, {

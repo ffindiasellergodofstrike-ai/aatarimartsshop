@@ -2,6 +2,8 @@
 import assert from "node:assert/strict";
 import {
   createFirestoreOrderStore,
+  createRtdbOrderStore,
+  normalizePrivateKey,
   resolveFirebaseConfig,
   OrderStoreUnavailableError,
   DuplicateOrderError,
@@ -261,6 +263,110 @@ try {
   globalThis.fetch = origFetch;
 }
 
+// 4. Test Firebase Realtime Database (RTDB) config + private key quote tolerance + atomic store
+const normalizedFromJson = normalizePrivateKey(
+  '"-----BEGIN PRIVATE KEY-----\\nLINE1\\nLINE2\\n-----END PRIVATE KEY-----\\n",'
+);
+assert.ok(normalizedFromJson.startsWith("-----BEGIN PRIVATE KEY-----\nLINE1\nLINE2\n-----END PRIVATE KEY-----"));
+assert.ok(!normalizedFromJson.startsWith('"'));
+
+const rtdbResolved = resolveFirebaseConfig({
+  VERCEL: "1",
+  FIREBASE_DATABASE_URL: "https://my-rtdb-app-default-rtdb.asia-southeast1.firebasedatabase.app/",
+  FIREBASE_CLIENT_EMAIL: "firebase-adminsdk@my-rtdb-app.iam.gserviceaccount.com",
+  FIREBASE_PRIVATE_KEY: '"-----BEGIN PRIVATE KEY-----\\nTESTKEY\\n-----END PRIVATE KEY-----\\n"',
+});
+assert.equal(rtdbResolved.storageBackend, "rtdb");
+assert.equal(rtdbResolved.projectId, "my-rtdb-app");
+assert.equal(
+  rtdbResolved.databaseUrl,
+  "https://my-rtdb-app-default-rtdb.asia-southeast1.firebasedatabase.app"
+);
+
+function createFakeRtdb() {
+  const tree = new Map();
+  return {
+    ref(path) {
+      return {
+        async once(event) {
+          assert.equal(event, "value");
+          const exists = tree.has(path);
+          return {
+            exists: () => exists,
+            val: () => (exists ? structuredClone(tree.get(path)) : null),
+          };
+        },
+        async transaction(updateFn) {
+          const current = tree.has(path) ? structuredClone(tree.get(path)) : null;
+          const next = updateFn(current);
+          if (next === undefined) {
+            return {
+              committed: false,
+              snapshot: { val: () => (tree.has(path) ? structuredClone(tree.get(path)) : null) },
+            };
+          }
+          const resolvedObj = structuredClone(next);
+          for (const k of ["createdAt", "updatedAt", "paymentVerifiedAt", "telegramNotifiedAt"]) {
+            if (resolvedObj[k] && resolvedObj[k].__ts) {
+              resolvedObj[k] = 1795600000000;
+            }
+          }
+          tree.set(path, resolvedObj);
+          return {
+            committed: true,
+            snapshot: { val: () => structuredClone(resolvedObj) },
+          };
+        },
+        async update(patch) {
+          const prev = tree.get(path) || {};
+          const next = { ...prev, ...structuredClone(patch) };
+          for (const k of ["updatedAt", "telegramNotifiedAt"]) {
+            if (next[k] && next[k].__ts) next[k] = 1795600000000;
+          }
+          tree.set(path, next);
+        },
+      };
+    },
+  };
+}
+
+const fakeRtdb = createFakeRtdb();
+const rtdbStore = createRtdbOrderStore(fakeRtdb, { serverTimestamp: () => ({ __ts: true }) });
+const rtdbToken = newGuestOrderToken();
+const rtdbOrder = {
+  id: "AMRTDB1234567890AB",
+  status: "pending",
+  fulfillmentStatus: "awaiting_payment",
+  paymentMethod: "prepaid",
+  currency: "INR",
+  total: 599,
+  payAmount: 599,
+  balanceDue: 0,
+  customer: { name: "Rohan Verma", email: "rohan@gmail.com" },
+  items: [{ id: "1", qty: 1, title: "Kurta", unitPrice: 599 }],
+  accessTokenHash: hashGuestToken(rtdbToken),
+};
+await rtdbStore.save(rtdbOrder, true);
+await assert.rejects(() => rtdbStore.save(rtdbOrder, true), DuplicateOrderError);
+const rtdbFound = await rtdbStore.find(rtdbOrder.id);
+assert.equal(rtdbFound.status, "pending");
+assert.ok(rtdbFound.createdAt.startsWith("2026-"));
+const rtdbPaid = await rtdbStore.reconcile(rtdbOrder.id, current =>
+  computeOrderReconciliationPatch(current, {
+    state: "success",
+    unmapped: "captured",
+    amount: 599,
+    txnId: rtdbOrder.id,
+    payuId: "PAYURTDB1",
+  })
+);
+assert.equal(rtdbPaid.status, "paid");
+const rtdbClaim1 = await rtdbStore.claimTelegramNotification(rtdbOrder.id);
+assert.equal(rtdbClaim1.claimed, true);
+const rtdbClaim2 = await rtdbStore.claimTelegramNotification(rtdbOrder.id);
+assert.equal(rtdbClaim2.claimed, false);
+assert.equal(await rtdbStore.markTelegramNotificationSent(rtdbOrder.id), true);
+
 console.log(
-  "PASS: Firestore config fail-closed, transactional saves, duplicate protection, token matching, immutable paid/cod_advance_paid states, and record validation."
+  "PASS: Firestore & Realtime Database (RTDB) config fail-closed, transactional saves, duplicate protection, token matching, immutable paid/cod_advance_paid states, and record validation."
 );

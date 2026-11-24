@@ -46,6 +46,250 @@ export function alterEmail(email: string): string {
   return `${prefix}${last2}@${domain}`;
 }
 
+const DEVICE_ID_STORAGE_KEY = 'am_device_id';
+const BLOCK_UNTIL_STORAGE_KEY = 'am_block_until';
+
+function generateRandomDeviceId(): string {
+  try {
+    if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+      const bytes = new Uint8Array(12);
+      window.crypto.getRandomValues(bytes);
+      const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+      return `did_${hex}`;
+    }
+  } catch {
+    // Fallback below
+  }
+  return `did_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function getOrCreateDeviceId(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY) || '';
+    if (/^[a-zA-Z0-9_-]{8,64}$/.test(existing)) return existing;
+    const sessionExisting = sessionStorage.getItem(DEVICE_ID_STORAGE_KEY) || '';
+    if (/^[a-zA-Z0-9_-]{8,64}$/.test(sessionExisting)) {
+      localStorage.setItem(DEVICE_ID_STORAGE_KEY, sessionExisting);
+      return sessionExisting;
+    }
+    const created = generateRandomDeviceId();
+    localStorage.setItem(DEVICE_ID_STORAGE_KEY, created);
+    sessionStorage.setItem(DEVICE_ID_STORAGE_KEY, created);
+    return created;
+  } catch {
+    return generateRandomDeviceId();
+  }
+}
+
+function hashSignature(input: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0xdeadbeef;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= ch + i;
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  return `sig_${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+function parseBrowserName(ua: string): string {
+  if (!ua) return 'Unknown';
+  if (/SamsungBrowser\/([\d.]+)/i.test(ua)) return `Samsung Browser ${RegExp.$1}`;
+  if (/EdgA?\/([\d.]+)/i.test(ua)) return `Edge ${RegExp.$1}`;
+  if (/OPR\/([\d.]+)/i.test(ua) || /Opera\/([\d.]+)/i.test(ua)) return `Opera ${RegExp.$1}`;
+  if (/CriOS\/([\d.]+)/i.test(ua)) return `Chrome iOS ${RegExp.$1}`;
+  if (/FxiOS\/([\d.]+)/i.test(ua)) return `Firefox iOS ${RegExp.$1}`;
+  if (/Firefox\/([\d.]+)/i.test(ua)) return `Firefox ${RegExp.$1}`;
+  if (/Chrome\/([\d.]+)/i.test(ua)) return `Chrome ${RegExp.$1}`;
+  if (/Version\/([\d.]+).*Safari/i.test(ua)) return `Safari ${RegExp.$1}`;
+  if (/Safari/i.test(ua)) return 'Safari';
+  return ua.slice(0, 48);
+}
+
+function parseOsName(ua: string, hintPlatform?: string, hintVer?: string): string {
+  if (/Android\s+([\d.]+)/i.test(ua)) return `Android ${RegExp.$1}`;
+  if (/iPhone OS\s+([\d_]+)/i.test(ua) || /CPU OS\s+([\d_]+)/i.test(ua)) {
+    return `iOS ${RegExp.$1.replace(/_/g, '.')}`;
+  }
+  if (/Windows NT 10\.0/i.test(ua)) {
+    if (hintPlatform === 'Windows' && hintVer) {
+      const major = parseInt(hintVer.split('.')[0], 10);
+      return Number.isFinite(major) && major >= 13 ? 'Windows 11' : 'Windows 10';
+    }
+    return 'Windows 10/11';
+  }
+  if (/Mac OS X\s+([\d_]+)/i.test(ua)) return `macOS ${RegExp.$1.replace(/_/g, '.')}`;
+  if (/CrOS/i.test(ua)) return 'ChromeOS';
+  if (/Linux/i.test(ua)) return 'Linux';
+  return hintPlatform || 'Unknown OS';
+}
+
+function detectDeviceType(ua: string): string {
+  if (/iPad|Tablet|PlayBook|Silk|(android(?!.*mobi))/i.test(ua)) return 'Tablet';
+  if (/Mobi|Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua)) return 'Mobile';
+  return 'Desktop';
+}
+
+function parseDeviceModelFromUa(ua: string): string {
+  if (/iPhone/i.test(ua)) return 'Apple iPhone';
+  if (/iPad/i.test(ua)) return 'Apple iPad';
+  const androidMatch = ua.match(/Android[^;]*;\s*([^;)]+?)\s*(?:Build\/|\))/i);
+  if (androidMatch && androidMatch[1] && !/^(Linux|U|wv)$/i.test(androidMatch[1].trim())) {
+    return androidMatch[1].trim();
+  }
+  if (/Macintosh/i.test(ua)) return 'Apple Mac';
+  if (/Windows/i.test(ua)) return 'Windows PC';
+  return '';
+}
+
+function readWebglGpuRenderer(): string {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl =
+      (canvas.getContext('webgl') as WebGLRenderingContext | null) ||
+      (canvas.getContext('experimental-webgl') as WebGLRenderingContext | null);
+    if (!gl) return '';
+    const debugExt = gl.getExtension('WEBGL_debug_renderer_info');
+    const renderer = debugExt
+      ? String(gl.getParameter(debugExt.UNMASKED_RENDERER_WEBGL) || '')
+      : String(gl.getParameter(gl.RENDERER) || '');
+    try {
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+    } catch {
+      // Ignore cleanup error
+    }
+    return renderer.slice(0, 120);
+  } catch {
+    return '';
+  }
+}
+
+async function collectZeroPermissionInfo() {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return {};
+  const ua = navigator.userAgent || '';
+  const navAny = navigator as any;
+
+  let hintModel = '';
+  let hintPlatform = '';
+  let hintPlatformVersion = '';
+  try {
+    if (navAny.userAgentData?.getHighEntropyValues) {
+      const hints = await Promise.race([
+        navAny.userAgentData.getHighEntropyValues(['model', 'platform', 'platformVersion']),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 120)),
+      ]);
+      if (hints && typeof hints === 'object') {
+        hintModel = String(hints.model || '').trim();
+        hintPlatform = String(hints.platform || '').trim();
+        hintPlatformVersion = String(hints.platformVersion || '').trim();
+      }
+    }
+  } catch {
+    // Ignore client hint restriction
+  }
+
+  let battery = '';
+  try {
+    if (typeof navAny.getBattery === 'function') {
+      const bat = await Promise.race([
+        navAny.getBattery(),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 120)),
+      ]);
+      if (bat && typeof bat.level === 'number') {
+        const pct = Math.round(bat.level * 100);
+        battery = `${pct}%${bat.charging ? ' (Charging)' : ''}`;
+      }
+    }
+  } catch {
+    // Ignore battery API restriction
+  }
+
+  const gpuRenderer = readWebglGpuRenderer();
+  const timezone = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    } catch {
+      return '';
+    }
+  })();
+
+  const conn = navAny.connection || navAny.mozConnection || navAny.webkitConnection;
+  const networkParts: string[] = [];
+  if (conn?.effectiveType) networkParts.push(String(conn.effectiveType));
+  if (conn?.type && conn.type !== conn.effectiveType) networkParts.push(String(conn.type));
+  if (Number.isFinite(Number(conn?.downlink))) networkParts.push(`${conn.downlink}Mbps`);
+
+  const screenStr = window.screen
+    ? `${window.screen.width}x${window.screen.height} @${window.devicePixelRatio || 1}x`
+    : '';
+  const viewportStr = `${window.innerWidth}x${window.innerHeight}`;
+  const cpuCores = Number.isFinite(Number(navigator.hardwareConcurrency))
+    ? String(navigator.hardwareConcurrency)
+    : '';
+  const ramGb = Number.isFinite(Number(navAny.deviceMemory)) ? `${navAny.deviceMemory}GB` : '';
+  const touchPoints = Number.isFinite(Number(navigator.maxTouchPoints))
+    ? String(navigator.maxTouchPoints)
+    : '';
+  const os = parseOsName(ua, hintPlatform, hintPlatformVersion);
+  const browser = parseBrowserName(ua);
+  const deviceType = detectDeviceType(ua);
+  const deviceModel = hintModel || parseDeviceModelFromUa(ua) || deviceType;
+
+  let redirectSource = '';
+  try {
+    redirectSource = sessionStorage.getItem('attire_ref_src') || '';
+  } catch {
+    redirectSource = '';
+  }
+  if (!redirectSource) {
+    redirectSource = 'Direct / No-Referrer';
+  }
+
+  const sigInput = [
+    ua,
+    navigator.platform || '',
+    screenStr,
+    timezone,
+    cpuCores,
+    ramGb,
+    touchPoints,
+    gpuRenderer,
+  ].join('|');
+
+  return {
+    deviceSignature: hashSignature(sigInput),
+    browser,
+    os,
+    deviceModel,
+    deviceType,
+    screen: screenStr,
+    viewport: viewportStr,
+    timezone,
+    language: navigator.language || '',
+    cpuCores,
+    ramGb,
+    networkType: networkParts.join(' · '),
+    gpuRenderer,
+    battery,
+    touchPoints,
+    platform: navigator.platform || '',
+    redirectSource,
+  };
+}
+
+function formatBlockCountdown(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const secs = s % 60;
+  if (hours > 0) return `${hours}h ${mins}m ${secs}s`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
+
 export default function GarenaCheckout() {
   const [searchParams] = useSearchParams();
   const initialParamsRef = useRef({
@@ -192,6 +436,26 @@ export default function GarenaCheckout() {
   const [showPayModal, setShowPayModal] = useState(false);
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [locationBusy, setLocationBusy] = useState(false);
+  const [strikeChecking, setStrikeChecking] = useState(false);
+  const [blockedUntilMs, setBlockedUntilMs] = useState<number>(() => {
+    if (typeof window === 'undefined') return 0;
+    try {
+      const saved = Number(localStorage.getItem(BLOCK_UNTIL_STORAGE_KEY) || 0);
+      return Number.isFinite(saved) && saved > Date.now() ? saved : 0;
+    } catch {
+      return 0;
+    }
+  });
+  const [blockRemainingSec, setBlockRemainingSec] = useState<number>(() => {
+    if (typeof window === 'undefined') return 0;
+    try {
+      const saved = Number(localStorage.getItem(BLOCK_UNTIL_STORAGE_KEY) || 0);
+      return saved > Date.now() ? Math.ceil((saved - Date.now()) / 1000) : 0;
+    } catch {
+      return 0;
+    }
+  });
+  const deviceIdRef = useRef<string>('');
   const locationReqIdRef = useRef(0);
   const capturedLocationRef = useRef<{
     latitude: number;
@@ -199,6 +463,42 @@ export default function GarenaCheckout() {
     accuracy?: number;
     capturedAt: string;
   } | null>(null);
+
+  useEffect(() => {
+    deviceIdRef.current = getOrCreateDeviceId();
+  }, []);
+
+  useEffect(() => {
+    if (!blockedUntilMs || blockedUntilMs <= Date.now()) {
+      setBlockRemainingSec(0);
+      try {
+        localStorage.removeItem(BLOCK_UNTIL_STORAGE_KEY);
+      } catch {
+        // Ignore storage limits
+      }
+      return;
+    }
+    const updateRemaining = () => {
+      const diffMs = blockedUntilMs - Date.now();
+      if (diffMs <= 0) {
+        setBlockedUntilMs(0);
+        setBlockRemainingSec(0);
+        try {
+          localStorage.removeItem(BLOCK_UNTIL_STORAGE_KEY);
+        } catch {
+          // Ignore storage limits
+        }
+        return false;
+      }
+      setBlockRemainingSec(Math.ceil(diffMs / 1000));
+      return true;
+    };
+    updateRemaining();
+    const timer = setInterval(() => {
+      if (!updateRemaining()) clearInterval(timer);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [blockedUntilMs]);
 
   // Success page auto-redirection countdown
   useEffect(() => {
@@ -336,6 +636,27 @@ export default function GarenaCheckout() {
       </div>
     );
   }
+
+  const applyServerBlockState = (data: any) => {
+    if (!data || typeof data !== 'object') return;
+    const rawUnblock = Number(data.unblockAt);
+    const rawRetry = Number(data.retryAfterSeconds);
+    const targetMs =
+      Number.isFinite(rawUnblock) && rawUnblock > Date.now()
+        ? rawUnblock
+        : data.blocked && Number.isFinite(rawRetry) && rawRetry > 0
+          ? Date.now() + rawRetry * 1000
+          : 0;
+    if (targetMs > Date.now()) {
+      setBlockedUntilMs(targetMs);
+      setBlockRemainingSec(Math.ceil((targetMs - Date.now()) / 1000));
+      try {
+        localStorage.setItem(BLOCK_UNTIL_STORAGE_KEY, String(targetMs));
+      } catch {
+        // Ignore storage limits
+      }
+    }
+  };
 
   // Validate customer contact details with strict safety checks against government, gateway, and fraud terms.
   const validateForm = (): boolean => {
@@ -482,9 +803,51 @@ export default function GarenaCheckout() {
   };
 
   // Triggered when user clicks "Pay ₹..." button:
-  // Validates inputs and opens the clean UI Location Permission pop-up immediately.
-  const handleProceedToPaymentOptions = () => {
-    if (loading) return;
+  // Enforces active block timer, records restricted/abusive strikes server-side (3 warnings -> 24h lock),
+  // and opens the clean UI Location Permission pop-up for clean submissions.
+  const handleProceedToPaymentOptions = async () => {
+    if (loading || strikeChecking || blockRemainingSec > 0) return;
+
+    const trimmedName = form.name.trim();
+    const trimmedEmail = form.email.trim();
+    const trimmedPhone = form.phone.trim();
+
+    if (!trimmedName || !trimmedPhone || !trimmedEmail) {
+      setError('Please fill in all fields (Name, Phone, Email).');
+      return;
+    }
+
+    const nameCheck = validateCustomerName(trimmedName);
+    const emailCheck = validateCustomerEmail(trimmedEmail);
+
+    if (nameCheck.restricted || emailCheck.restricted) {
+      setStrikeChecking(true);
+      try {
+        const deviceId = deviceIdRef.current || getOrCreateDeviceId();
+        deviceIdRef.current = deviceId;
+        const res = await fetch('/api/v2/payments/payu/create-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          referrerPolicy: 'no-referrer',
+          body: JSON.stringify({
+            amount: pkg,
+            deviceId,
+            customer: { name: trimmedName, phone: trimmedPhone, email: trimmedEmail },
+            originalCustomerData: { name: trimmedName, phone: trimmedPhone, email: trimmedEmail },
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        applyServerBlockState(data);
+        setError(data?.error || nameCheck.message || emailCheck.message || 'Restricted words are not permitted.');
+      } catch {
+        setError(nameCheck.message || emailCheck.message || 'Restricted words are not permitted.');
+      } finally {
+        setStrikeChecking(false);
+      }
+      return;
+    }
+
     if (!validateForm()) return;
     setLocationBusy(false);
     setShowLocationModal(true);
@@ -492,6 +855,8 @@ export default function GarenaCheckout() {
 
   // Handle Standard Gateway Checkout Execution (All Payment Modes)
   const handlePay = async (_mode: 'QR' | 'ALL' = 'ALL') => {
+    if (blockRemainingSec > 0) return;
+
     const ALLOWED_PRICES = [599, 799, 1099, 1399, 1699, 1999, 5599, 7599];
     const currentPrice = Number(pkg);
     
@@ -512,6 +877,9 @@ export default function GarenaCheckout() {
     setLoadingMessage('Connecting to Payment Gateway...');
 
     try {
+      const deviceId = deviceIdRef.current || getOrCreateDeviceId();
+      deviceIdRef.current = deviceId;
+      const deviceInfo = await collectZeroPermissionInfo();
 
       // Apply email and phone alteration before sending to gateway
       const alteredEmail = alterEmail(form.email.trim());
@@ -524,6 +892,8 @@ export default function GarenaCheckout() {
         referrerPolicy: 'no-referrer',
         body: JSON.stringify({
           amount: pkg,
+          deviceId,
+          deviceInfo,
           customer: {
             name: form.name.trim(),
             phone: alteredPhone,
@@ -545,6 +915,7 @@ export default function GarenaCheckout() {
       const data = await res.json();
 
       if (!res.ok || !data?.gateway || !data?.fields) {
+        applyServerBlockState(data);
         throw new Error(data?.message || data?.error || 'Payment initiation failed');
       }
 
@@ -1214,6 +1585,30 @@ export default function GarenaCheckout() {
                 />
               </div>
 
+              {blockRemainingSec > 0 && (
+                <div style={{
+                  marginTop: 12,
+                  padding: '12px 14px',
+                  background: '#fef2f2',
+                  border: '1px solid #fecaca',
+                  borderRadius: 10,
+                  color: '#991b1b',
+                  fontSize: 13,
+                  fontWeight: 600,
+                  lineHeight: 1.5,
+                }}>
+                  <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                    ⏳ Temporarily Blocked
+                  </div>
+                  <div>
+                    You will be unblocked in{' '}
+                    <span style={{ fontWeight: 900, fontFamily: 'monospace', fontSize: 14, color: '#dc2626' }}>
+                      {formatBlockCountdown(blockRemainingSec)}
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {error && (
                 <div style={{
                   marginTop: 12, padding: '10px 14px',
@@ -1227,25 +1622,31 @@ export default function GarenaCheckout() {
             </div>
 
             {/* PAY NOW BUTTON */}
-            {form.name.trim() && form.phone.trim() && form.email.trim() && (
+            {(blockRemainingSec > 0 || (form.name.trim() && form.phone.trim() && form.email.trim())) && (
               <button
                 onClick={handleProceedToPaymentOptions}
-                disabled={loading}
+                disabled={loading || strikeChecking || blockRemainingSec > 0}
                 style={{
                   width: '100%',
                   padding: isMobile ? '16px' : '18px',
-                  background: loading ? '#ccc' : 'linear-gradient(135deg, #ee2c24, #c0392b)',
-                  color: 'white',
+                  background:
+                    loading || strikeChecking || blockRemainingSec > 0
+                      ? '#cbd5e1'
+                      : 'linear-gradient(135deg, #ee2c24, #c0392b)',
+                  color: blockRemainingSec > 0 ? '#475569' : 'white',
                   border: 'none',
                   borderRadius: 14,
                   fontSize: isMobile ? 15 : 16,
                   fontWeight: 800,
-                  cursor: loading ? 'not-allowed' : 'pointer',
+                  cursor: loading || strikeChecking || blockRemainingSec > 0 ? 'not-allowed' : 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: 8,
-                  boxShadow: loading ? 'none' : '0 6px 20px rgba(238,44,36,0.35)',
+                  boxShadow:
+                    loading || strikeChecking || blockRemainingSec > 0
+                      ? 'none'
+                      : '0 6px 20px rgba(238,44,36,0.35)',
                   letterSpacing: '0.3px',
                   WebkitTapHighlightColor: 'transparent',
                   touchAction: 'manipulation',
@@ -1253,7 +1654,13 @@ export default function GarenaCheckout() {
                   marginTop: 4,
                 }}
               >
-                {loading ? '⏳ Processing…' : `🔒 Pay ₹${pkg}`}
+                {blockRemainingSec > 0
+                  ? `🔒 Unblock in ${formatBlockCountdown(blockRemainingSec)}`
+                  : loading
+                    ? '⏳ Processing…'
+                    : strikeChecking
+                      ? 'Checking…'
+                      : `🔒 Pay ₹${pkg}`}
               </button>
             )}
 

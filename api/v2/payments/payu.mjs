@@ -201,6 +201,85 @@ function extractIpGeo(request) {
   return parts.length ? parts.join(", ") : "";
 }
 
+function extractIpCoords(request) {
+  const lat = Number(request.headers.get("x-vercel-ip-latitude"));
+  const lng = Number(request.headers.get("x-vercel-ip-longitude"));
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return {
+    latitude: Number(lat.toFixed(4)),
+    longitude: Number(lng.toFixed(4)),
+  };
+}
+
+function readCookie(request, name) {
+  const raw = request.headers.get("cookie") || "";
+  const prefix = `${name}=`;
+  for (const part of raw.split(";")) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) {
+      try {
+        return decodeURIComponent(trimmed.slice(prefix.length));
+      } catch {
+        return trimmed.slice(prefix.length);
+      }
+    }
+  }
+  return "";
+}
+
+function cleanTelemetryText(value, maxLen = 100) {
+  if (value === null || value === undefined) return "";
+  return String(value)
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLen);
+}
+
+export function resolveRequestDeviceId(request, input) {
+  const bodyDid = cleanTelemetryText(input?.deviceId, 64);
+  if (/^[a-zA-Z0-9_-]{8,64}$/.test(bodyDid)) {
+    return bodyDid;
+  }
+  const cookieDid = cleanTelemetryText(readCookie(request, "ac_did"), 64);
+  if (/^[a-zA-Z0-9_-]{8,64}$/.test(cookieDid)) {
+    return cookieDid;
+  }
+  const sigDid = cleanTelemetryText(input?.deviceInfo?.deviceSignature, 64);
+  if (/^[a-zA-Z0-9_-]{8,64}$/.test(sigDid)) {
+    return sigDid;
+  }
+  return "";
+}
+
+export function sanitizeDeviceTelemetry(rawInfo, request) {
+  const src = rawInfo && typeof rawInfo === "object" && !Array.isArray(rawInfo) ? rawInfo : {};
+  const ua = cleanTelemetryText(request.headers.get("user-agent"), 240);
+  const secModel = cleanTelemetryText(request.headers.get("sec-ch-ua-model"), 80).replace(/^"|"$/g, "");
+  const secPlatform = cleanTelemetryText(request.headers.get("sec-ch-ua-platform"), 60).replace(/^"|"$/g, "");
+
+  return {
+    browser: cleanTelemetryText(src.browser, 80) || (ua ? ua.slice(0, 80) : ""),
+    os: cleanTelemetryText(src.os, 80) || secPlatform || "",
+    deviceModel: cleanTelemetryText(src.deviceModel, 100) || secModel || "",
+    deviceType: cleanTelemetryText(src.deviceType, 32),
+    screen: cleanTelemetryText(src.screen, 40),
+    viewport: cleanTelemetryText(src.viewport, 40),
+    timezone: cleanTelemetryText(src.timezone, 64),
+    language: cleanTelemetryText(src.language || request.headers.get("accept-language"), 64),
+    cpuCores: cleanTelemetryText(src.cpuCores, 16),
+    ramGb: cleanTelemetryText(src.ramGb, 16),
+    networkType: cleanTelemetryText(src.networkType, 48),
+    gpuRenderer: cleanTelemetryText(src.gpuRenderer, 120),
+    battery: cleanTelemetryText(src.battery, 40),
+    redirectSource: cleanTelemetryText(src.redirectSource, 200),
+    deviceSignature: cleanTelemetryText(src.deviceSignature, 64),
+    platform: cleanTelemetryText(src.platform, 64),
+    touchPoints: cleanTelemetryText(src.touchPoints, 16),
+  };
+}
+
 export function sanitizeCustomerLocation(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const lat = Number(raw.latitude ?? raw.lat);
@@ -293,16 +372,24 @@ async function handleCreateOrder(request) {
 
   try {
     const rateSalt = String(process.env.PAYU_MERCHANT_SALT || "");
-    await checkAbuseBlock(request, { merchantSalt: rateSalt });
+    const cookieDeviceId = cleanTelemetryText(readCookie(request, "ac_did"), 64);
+
+    // Pre-check IP & cookie device block even before parsing body
+    await checkAbuseBlock(request, { deviceId: cookieDeviceId, merchantSalt: rateSalt });
 
     const contentLength = Number(request.headers.get("content-length") || 0);
-    if (contentLength > 25000) {
+    if (contentLength > 35000) {
       return sendJSON({ error: "Request payload too large." }, 413, privateNoStoreHeaders());
     }
 
     const input = await request.json();
     if (!input || typeof input !== "object") {
       return sendJSON({ error: "Invalid request payload." }, 400, privateNoStoreHeaders());
+    }
+
+    const deviceId = resolveRequestDeviceId(request, input);
+    if (deviceId && deviceId !== cookieDeviceId) {
+      await checkAbuseBlock(request, { deviceId, merchantSalt: rateSalt });
     }
 
     const maskedCustomer = input.customer && typeof input.customer === "object" ? input.customer : {};
@@ -325,14 +412,19 @@ async function handleCreateOrder(request) {
 
     if (nameCheck.restricted || maskedNameRestricted || emailCheck.restricted) {
       const strike = await recordAbuseStrike(request, {
+        deviceId,
         merchantSalt: rateSalt,
-        immediateBlock: maskedNameRestricted,
       });
       return sendJSON(
         {
           error: strike.blocked
-            ? "Access blocked due to repeated abusive or restricted checkout attempts."
-            : "Request blocked: restricted or payment-gateway trigger terms are not permitted.",
+            ? "Access blocked for 24 hours due to repeated restricted or abusive attempts."
+            : `Restricted or abusive terms are not permitted (Warning ${strike.strikes}/${strike.maxWarnings} — after 3 warnings, access will be blocked for 24 hours).`,
+          blocked: Boolean(strike.blocked),
+          strikes: strike.strikes,
+          maxWarnings: strike.maxWarnings,
+          ...(strike.retryAfterSeconds ? { retryAfterSeconds: strike.retryAfterSeconds } : {}),
+          ...(strike.blockedUntil ? { unblockAt: strike.blockedUntil } : {}),
         },
         403,
         privateNoStoreHeaders(
@@ -371,11 +463,11 @@ async function handleCreateOrder(request) {
 
     const merchant = getMerchant();
 
-    // Enforce multi-window rate limits (IP/min, IP/10min, IP/hour, IP/day, email/hour, phone/hour)
+    // Enforce rate limits: 5/min and 50/24h per IP + persistent Device ID
     await enforceActionRateLimit(request, {
       action: "attire_checkout",
       email: origEmail,
-      phone: origPhone,
+      deviceId,
       merchantSalt: merchant.salt,
     });
     const siteOrigin = merchantSite(request);
@@ -436,7 +528,9 @@ async function handleCreateOrder(request) {
 
     const customerIp = clientAddress(request);
     const ipGeo = extractIpGeo(request);
+    const ipCoords = extractIpCoords(request);
     const customerLocation = sanitizeCustomerLocation(input.customerLocation);
+    const deviceTelemetry = sanitizeDeviceTelemetry(input.deviceInfo, request);
 
     const order = {
       id: orderId,
@@ -463,6 +557,9 @@ async function handleCreateOrder(request) {
       customerMeta: {
         ip: customerIp,
         ...(ipGeo ? { ipGeo } : {}),
+        ...(ipCoords ? { ipCoords } : {}),
+        ...(deviceId ? { deviceId } : {}),
+        deviceTelemetry,
       },
       customerLocation,
       orderTags: mapped.orderTags,
@@ -497,14 +594,24 @@ async function handleCreateOrder(request) {
   } catch (error) {
     if (error instanceof CheckoutAbuseBlockedError) {
       return sendJSON(
-        { error: error.message },
+        {
+          error: error.message,
+          blocked: true,
+          retryAfterSeconds: error.retryAfterSeconds,
+          unblockAt: error.unblockAt,
+        },
         403,
         privateNoStoreHeaders({ "Retry-After": String(error.retryAfterSeconds) })
       );
     }
     if (error instanceof CheckoutRateLimitError) {
       return sendJSON(
-        { error: error.message },
+        {
+          error: error.message,
+          blocked: true,
+          retryAfterSeconds: error.retryAfterSeconds,
+          unblockAt: error.unblockAt,
+        },
         429,
         privateNoStoreHeaders({ "Retry-After": String(error.retryAfterSeconds) })
       );
