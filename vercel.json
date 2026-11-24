@@ -8,9 +8,28 @@
   "functions": {
     "api/*.mjs": {
       "maxDuration": 30
+    },
+    "api/private-checkout.mjs": {
+      "maxDuration": 30,
+      "includeFiles": "dist-private/attirecheckout.bundle.js"
+    },
+    "api/v2/payments/payu/*.mjs": {
+      "maxDuration": 30
     }
   },
   "rewrites": [
+    {
+      "source": "/attirecheckout",
+      "destination": "/api/private-checkout"
+    },
+    {
+      "source": "/attire-checkout",
+      "destination": "/api/private-checkout"
+    },
+    {
+      "source": "/collections",
+      "destination": "/collections/all/index.html"
+    },
     {
       "source": "/products/:handle",
       "destination": "/products/:handle/index.html"
@@ -88,6 +107,57 @@
         {
           "key": "Referrer-Policy",
           "value": "strict-origin-when-cross-origin"
+        }
+      ]
+    },
+    {
+      "source": "/attirecheckout",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow, noarchive"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "private, no-store, max-age=0"
+        }
+      ]
+    },
+    {
+      "source": "/attire-checkout",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow, noarchive"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "private, no-store, max-age=0"
+        }
+      ]
+    },
+    {
+      "source": "/api/private-checkout",
+      "headers": [
+        {
+          "key": "X-Robots-Tag",
+          "value": "noindex, nofollow, noarchive"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "Cache-Control",
+          "value": "private, no-store, max-age=0"
         }
       ]
     }

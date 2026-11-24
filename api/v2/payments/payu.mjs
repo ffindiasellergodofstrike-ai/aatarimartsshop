@@ -521,3 +521,9 @@ export const createPayuIsolatedOrder = { fetch: handleCreateOrder };
 export const payuIsolatedReturn = { fetch: handlePayuReturn };
 export const payuIsolatedWebhook = { fetch: handlePayuWebhook };
 export const payuIsolatedStatus = { fetch: handlePayuStatus };
+
+export default {
+  fetch() {
+    return sendJSON({ error: "Not found" }, 404, privateNoStoreHeaders());
+  },
+};

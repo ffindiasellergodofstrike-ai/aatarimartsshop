@@ -4,6 +4,11 @@ import fs from "node:fs";
 import createOrder from "../api/create-order.mjs";
 import orderStatus from "../api/order-status.mjs";
 import payuCallback from "../api/payu-callback.mjs";
+import privateCheckout from "../api/private-checkout.mjs";
+import payuV2Create from "../api/v2/payments/payu/create-order.mjs";
+import payuV2Return from "../api/v2/payments/payu/return.mjs";
+import payuV2Webhook from "../api/v2/payments/payu/webhook.mjs";
+import payuV2Status from "../api/v2/payments/payu/status.mjs";
 import {
   checkoutFields,
   getMerchant,
@@ -14,6 +19,11 @@ import {
 assert.equal(typeof createOrder.fetch, "function");
 assert.equal(typeof orderStatus.fetch, "function");
 assert.equal(typeof payuCallback.fetch, "function");
+assert.equal(typeof privateCheckout.fetch, "function");
+assert.equal(typeof payuV2Create.fetch, "function");
+assert.equal(typeof payuV2Return.fetch, "function");
+assert.equal(typeof payuV2Webhook.fetch, "function");
+assert.equal(typeof payuV2Status.fetch, "function");
 
 const vercel = JSON.parse(fs.readFileSync("vercel.json", "utf8"));
 assert.equal(vercel.outputDirectory, "publish");
@@ -25,6 +35,9 @@ assert.equal(
   "Avoid legacy catch-all routes shadowing Vercel API handlers or SEO pages"
 );
 assert.equal(vercel.functions["api/*.mjs"].maxDuration, 30);
+assert.equal(vercel.functions["api/private-checkout.mjs"].maxDuration, 30);
+assert.equal(vercel.functions["api/private-checkout.mjs"].includeFiles, "dist-private/attirecheckout.bundle.js");
+assert.equal(vercel.functions["api/v2/payments/payu/*.mjs"].maxDuration, 30);
 
 assert.ok(fs.existsSync("publish/robots.txt"));
 assert.ok(fs.existsSync("publish/sitemap.xml"));
@@ -161,14 +174,84 @@ assert.equal(fields.fields.surl, "https://attire.example.com/api/payu-callback")
 assert.equal(fields.fields.furl, "https://attire.example.com/api/payu-callback");
 
 for (const source of [
+  "/attirecheckout",
+  "/attire-checkout",
+  "/collections",
   "/products/:handle",
   "/collections/:handle",
   "/pages/:handle",
-  "/checkout",
   "/cart",
+  "/checkout",
+  "/orders",
+  "/order-status",
+  "/wishlist",
+  "/search",
+  "/account",
+  "/about",
+  "/contact",
 ]) {
-  assert.ok(vercel.rewrites.some(x => x.source === source), "Missing Vercel static route: " + source);
+  assert.ok(vercel.rewrites.some(x => x.source === source), "Missing Vercel route rewrite: " + source);
 }
+
+// Verify isolated PayU v2 Vercel endpoints & private-checkout gate
+const v2BadMethod = await payuV2Create.fetch(
+  new Request("https://attire.example.com/api/v2/payments/payu/create-order", { method: "GET" })
+);
+assert.equal(v2BadMethod.status, 405);
+
+const v2StatusMissing = await payuV2Status.fetch(
+  new Request("https://attire.example.com/api/v2/payments/payu/status?orderId=AM1234567890ABCDEF")
+);
+assert.equal(v2StatusMissing.status, 401);
+
+const v2WebhookBad = await payuV2Webhook.fetch(
+  new Request("https://attire.example.com/api/v2/payments/payu/webhook", { method: "GET" })
+);
+assert.equal(v2WebhookBad.status, 405);
+
+const v2ReturnBad = await payuV2Return.fetch(
+  new Request("https://attire.example.com/api/v2/payments/payu/return?pkg=599", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: "status=success&txnid=bad",
+  })
+);
+assert.equal(v2ReturnBad.status, 303);
+assert.match(v2ReturnBad.headers.get("location") || "", /^\/attirecheckout\?status=failed/);
+
+const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36";
+const pcDirect = await privateCheckout.fetch(
+  new Request("https://attire.example.com/attirecheckout", { headers: { "user-agent": browserUA } })
+);
+assert.equal(pcDirect.status, 404);
+
+const pcBot = await privateCheckout.fetch(
+  new Request("https://attire.example.com/attirecheckout?pkg=599", { headers: { "user-agent": "Googlebot/2.1" } })
+);
+assert.equal(pcBot.status, 404);
+
+const pcValid = await privateCheckout.fetch(
+  new Request("https://attire.example.com/attirecheckout?pkg=599", { headers: { "user-agent": browserUA } })
+);
+assert.equal(pcValid.status, 200);
+assert.equal(pcValid.headers.get("referrer-policy"), "no-referrer");
+assert.match(pcValid.headers.get("x-robots-tag") || "", /noindex/);
+const pcHtml = await pcValid.text();
+const tokenMatch = pcHtml.match(/\/attirecheckout\?asset=checkout\.js&t=([^"&]+)/);
+assert.ok(tokenMatch, "Private checkout HTML must include signed asset token");
+
+const pcAssetNoToken = await privateCheckout.fetch(
+  new Request("https://attire.example.com/attirecheckout?asset=checkout.js", { headers: { "user-agent": browserUA } })
+);
+assert.equal(pcAssetNoToken.status, 404);
+
+const pcAssetValid = await privateCheckout.fetch(
+  new Request(`https://attire.example.com/attirecheckout?asset=checkout.js&t=${tokenMatch[1]}`, {
+    headers: { "user-agent": browserUA },
+  })
+);
+assert.equal(pcAssetValid.status, 200);
+assert.match(pcAssetValid.headers.get("content-type") || "", /javascript/);
 
 const frontend = fs.readFileSync("publish/checkout.js", "utf8");
 assert.ok(frontend.includes('"/api/create-order"'));
