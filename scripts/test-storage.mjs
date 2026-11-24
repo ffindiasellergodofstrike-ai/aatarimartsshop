@@ -278,6 +278,7 @@ const rtdbResolved = resolveFirebaseConfig({
 });
 assert.equal(rtdbResolved.storageBackend, "rtdb");
 assert.equal(rtdbResolved.projectId, "my-rtdb-app");
+assert.equal(rtdbResolved.databaseId, "(default)");
 assert.equal(
   rtdbResolved.databaseUrl,
   "https://my-rtdb-app-default-rtdb.asia-southeast1.firebasedatabase.app"
