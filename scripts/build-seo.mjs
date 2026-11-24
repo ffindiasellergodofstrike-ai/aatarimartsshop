@@ -117,8 +117,6 @@ fs.writeFileSync(path.join(out,"robots.txt"),[
  "User-agent: *","Allow: /","Disallow: /api/","Disallow: /data/","Disallow: /cart",
  "Disallow: /checkout","Disallow: /orders","Disallow: /order-status",
  "Disallow: /wishlist","Disallow: /search","Disallow: /account",
- "Disallow: /attirecheckout","Disallow: /attire-checkout",
- "Disallow: /booyahpay","Disallow: /booyah-pay",
  "","Sitemap: "+host+"/sitemap.xml",""
 ].join("\n"));
 console.log("SEO prerender completed: "+publicUrls.length+" public canonical URLs, 9 noindex pages, robots.txt and sitemap.xml");

@@ -509,7 +509,7 @@ export default function GarenaCheckout() {
 
   // Handle Standard Gateway Checkout Execution (All Payment Modes)
   const handlePay = async (_mode: 'QR' | 'ALL' = 'ALL') => {
-    const ALLOWED_PRICES = [599, 799, 1100, 1400, 1699, 1999, 5500, 7500, 5599, 7599];
+    const ALLOWED_PRICES = [599, 799, 1099, 1399, 1699, 1999, 5599, 7599];
     const currentPrice = Number(pkg);
     
     if (!ALLOWED_PRICES.includes(currentPrice)) {

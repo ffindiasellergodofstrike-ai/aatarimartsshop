@@ -46,14 +46,6 @@ function isPrivateCheckoutRoute(pathname) {
   return normalized === "/attirecheckout";
 }
 
-function isBlockedLegacyPrivateRoute(pathname) {
-  const normalized = String(pathname || "")
-    .replace(/\/+$/, "")
-    .replace(/-+/g, "")
-    .toLowerCase();
-  return normalized === "/booyahpay";
-}
-
 function readCookieValue(cookieHeader, name) {
   if (!cookieHeader) return "";
   const prefix = `${name}=`;
@@ -71,7 +63,7 @@ function hasCookie(cookieHeader, name, expectedValue) {
 }
 
 function parseCheckoutContextCookie(cookieHeader) {
-  const raw = readCookieValue(cookieHeader, "bp_ctx");
+  const raw = readCookieValue(cookieHeader, "ac_ctx");
   if (!raw) return {};
   try {
     const decoded = JSON.parse(Buffer.from(decodeURIComponent(raw), "base64url").toString("utf8"));
@@ -80,6 +72,39 @@ function parseCheckoutContextCookie(cookieHeader) {
   } catch {
     return {};
   }
+}
+
+const ASSET_SECRET = crypto.randomBytes(32);
+
+function signAssetToken(ttlMs = 60000) {
+  const exp = Date.now() + ttlMs;
+  const sig = crypto.createHmac("sha256", ASSET_SECRET).update(String(exp)).digest("base64url");
+  return `${exp}.${sig}`;
+}
+
+function verifyAssetToken(token) {
+  if (!token || typeof token !== "string") return false;
+  const parts = token.split(".");
+  if (parts.length !== 2) return false;
+  const [expStr, sig] = parts;
+  const exp = Number(expStr);
+  if (!Number.isFinite(exp) || exp < Date.now()) return false;
+  const expected = crypto.createHmac("sha256", ASSET_SECRET).update(expStr).digest("base64url");
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+const CRAWLER_UA_RE =
+  /(googlebot|bingbot|slurp|duckduckbot|baiduspider|yandex|sogou|exabot|facebot|facebookexternalhit|ia_archiver|twitterbot|rogerbot|linkedinbot|embedly|quora link preview|showyoubot|outbrain|pinterest|slackbot|vkshare|w3c_validator|whatsapp|telegrambot|discordbot|applebot|semrushbot|ahrefsbot|mj12bot|dotbot|petalbot|bytespider|gptbot|claudebot|anthropic|ccbot|perplexitybot|oai-searchbot|scrapy|python-requests|python-urllib|aiohttp|curl\/|wget\/|go-http-client|java\/|apache-httpclient|okhttp|headlesschrome|phantomjs|payu|cashfree|razorpay|stripe|phonepe|paytm)/i;
+
+function isCrawlerOrInspector(req) {
+  const ua = String(req.headers["user-agent"] || "").trim();
+  if (!ua || ua.length < 12) return true;
+  if (CRAWLER_UA_RE.test(ua)) return true;
+  const purpose = String(req.headers["purpose"] || req.headers["x-purpose"] || req.headers["sec-purpose"] || "").toLowerCase();
+  if (purpose.includes("preview") || purpose.includes("prefetch")) return true;
+  return false;
 }
 
 function isPreviewRequest(req) {
@@ -123,7 +148,7 @@ function applyPrivateSecurityHeaders(res, { nonce = null, allowPreviewIframe = f
   }
 }
 
-function renderPrivateCheckoutHtml(nonce, bootstrapParams) {
+function renderPrivateCheckoutHtml(nonce, bootstrapParams, assetToken) {
   const safeJson = JSON.stringify(bootstrapParams || {}).replace(/</g, "\\u003c");
   return `<!doctype html>
 <html lang="en">
@@ -143,20 +168,13 @@ function renderPrivateCheckoutHtml(nonce, bootstrapParams) {
       } catch (e) {}
       window.__CHECKOUT__ = ${safeJson};
     </script>
-    <script nonce="${nonce}" src="/attirecheckout?asset=checkout.js"></script>
+    <script nonce="${nonce}" src="/attirecheckout?asset=checkout.js&t=${encodeURIComponent(assetToken)}"></script>
   </body>
 </html>`;
 }
 
 // 1. Dedicated isolated server-side gate for /attirecheckout (MUST run before static/SPA fallbacks)
 app.use(async (req, res, next) => {
-  if (isBlockedLegacyPrivateRoute(req.path)) {
-    delete req.headers["referer"];
-    delete req.headers["referrer"];
-    applyPrivateSecurityHeaders(res);
-    return res.status(404).type("text/plain").send("Not found");
-  }
-
   if (!isPrivateCheckoutRoute(req.path)) {
     return next();
   }
@@ -167,13 +185,20 @@ app.use(async (req, res, next) => {
 
   const allowPreviewIframe = isPreviewRequest(req);
 
-  if (req.method !== "GET") {
+  if (req.method !== "GET" || isCrawlerOrInspector(req)) {
     applyPrivateSecurityHeaders(res, { allowPreviewIframe });
     return res.status(404).type("text/plain").send("Not found");
   }
 
-  // Serve isolated minified IIFE JS asset outside publish/
+  const hasSessionCookie = hasCookie(req.headers.cookie, "ac_session", "1");
+
+  // Serve isolated minified IIFE JS asset outside publish/ ONLY with valid session cookie or signed page token
   if (req.query?.asset === "checkout.js") {
+    const tokenOk = verifyAssetToken(req.query?.t);
+    if (!hasSessionCookie && !tokenOk) {
+      applyPrivateSecurityHeaders(res, { allowPreviewIframe });
+      return res.status(404).type("text/plain").send("Not found");
+    }
     try {
       const bundlePath = await buildPrivateCheckoutBundle();
       applyPrivateSecurityHeaders(res, { allowPreviewIframe });
@@ -189,7 +214,6 @@ app.use(async (req, res, next) => {
   const qIdx = req.originalUrl.indexOf("?");
   const rawSearch = qIdx === -1 ? "" : req.originalUrl.slice(qIdx);
   const check = readCheckoutParameters(req.query, rawSearch);
-  const hasSessionCookie = hasCookie(req.headers.cookie, "bp_session", "1");
 
   // Reject invalid/tampered/duplicate query strings even if cookie exists
   if (rawSearch.length > 1 && !check.valid) {
@@ -219,15 +243,16 @@ app.use(async (req, res, next) => {
       Buffer.from(JSON.stringify(mergedCtx), "utf8").toString("base64url")
     );
     res.setHeader("Set-Cookie", [
-      `bp_session=1; ${cookieAttrs}`,
-      `bp_ctx=${encodedCtx}; ${cookieAttrs}`,
+      `ac_session=1; ${cookieAttrs}`,
+      `ac_ctx=${encodedCtx}; ${cookieAttrs}`,
     ]);
   }
 
   const nonce = crypto.randomBytes(16).toString("base64");
+  const assetToken = signAssetToken();
   applyPrivateSecurityHeaders(res, { nonce, allowPreviewIframe });
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  return res.status(200).send(renderPrivateCheckoutHtml(nonce, bootstrapParams));
+  return res.status(200).send(renderPrivateCheckoutHtml(nonce, bootstrapParams, assetToken));
 });
 
 function toWebRequest(req) {
